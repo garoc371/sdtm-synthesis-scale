@@ -1,5 +1,7 @@
 cache/
-bench/
+bench/*
+!bench/build_bench.R
+!bench/eval/
 .Rhistory
 .RData
 .Rproj.user/

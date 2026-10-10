@@ -45,4 +45,25 @@ A sampled node is fitted per test and per stage (first record of a series, or a 
 
 DM has one record per subject. Findings (--TESTCD) and datasets with one record per subject and visit follow a schedule of planned keys: the visit and test, then the categories that best separate repeated records. When these leave records unseparated, a text column that separates 99% of a subject's records and whose values recur across subjects (TULNKID, TRLNKID: T01, NT01, NEW01) is a key whatever its number of values, so the records linking TR to TU come from one donor. Otherwise, a category that every subject has the same number of records of (one DSCAT "DISPOSITION EVENT" each in DS) is planned the same way, and values are modelled per category. Everything else is a count of records per subject. Category values whose per-subject count never varies in the source are coherence checks on the generated data.
 
+## Benchmark
+
+`bench/`. `Rscript bench/build_bench.R` writes two folders (needs `pharmaversesdtm`):
+
+- **bench28**: the pilot's DM, EX, LB, MH, QS, SV, VS, AE, CM; pharmaversesdtm's DS, EG, PC, PP, and the ophthalmology and oncology OE, RS, SC, TR, TU; SUPP datasets; the pilot's trial design.
+- **bench72**: bench28 with QS, LB and OE split by category (QSAD, LBCH, OEVA, …) and 34 custom-domain replicas (XA…YA: a domain's records for 70% of its subjects, with its SUPP).
+
+`bench/eval/run.sh <label> [folder]` builds the study with the app's code, generates 254 subjects for seeds 1–3 and checks them with code kept apart from the app's:
+
+- **App checks**: the coherence checks the app runs itself.
+- **Relations**: mined on half of the real subjects and holding on the other half (date orders, functional dependencies, implications within and between datasets). One fails when fewer than 99% of synthetic subjects keep it in 2 of 3 seeds. Not counted: failures the real data already has as the app reads it (partial dates imputed), and in bench72 relations between a replica and a copy of the same domain (XA.XACLAS = CM.CMCLAS holds because XA copies CM).
+- **Fidelity**: mean total variation distance of categories and Kolmogorov–Smirnov distance of numbers, per variable.
+
+| | datasets | app checks failed | relations failing | mean TVD | mean KS |
+|---|---|---|---|---|---|
+| pilot | 10 | 0 of 127 | 9 | 0.050 | 0.090 |
+| bench28 | 28 | 0 of 255 | 32 | 0.041 | 0.087 |
+| bench72 | 72 | 0 of 762 | 3084 | 0.051 | 0.108 |
+
+bench72 builds in 305 s with 8 workers, 2.4 GB at most.
+
 Data: [CDISC pilot project](https://github.com/cdisc-org/sdtm-adam-pilot-project), study CDISCPILOT01.
