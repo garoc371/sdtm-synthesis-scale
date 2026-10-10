@@ -29,7 +29,7 @@ No rule is named in advance: every column is searched, on a sample of whole subj
 
 Searched rules come from a fixed set of operations (constant, sequence, study day, range flag, record flag, date offset, unit conversion, lookup, R expression). A unit conversion carries a result that is not a number ("PRESENT", "<5") over as written. Each operation proposes inputs from column kinds and the record structure only, learns its parameters from the source, and is judged by the share of records it reproduces.
 
-A rule's share counts only *checked* records, meaning records that could contradict it. A lookup is scored on subjects it was not learnt from: the table is learnt on the odd-numbered subjects and checked on the even ones, then the other way round, so checked records are those whose key also occurs in the other half. Otherwise a table of many keys memorises which keys happened to carry a rare value (AELLT to AESHOSP: the hospitalised terms) without predicting it. A rule is proposed when it reproduces at least 90% of checked records, including half of the records that the most common value gets wrong, so a skewed target is not "explained" by an arbitrary input. Lookup keys are categories shared by at least two subjects per value on average, so a subject's own code is never a key; record numbers (--SEQ) are never keys either. In a scheduled dataset all its record keys together are also tried as one key, for values set by the schedule (RSLNKGRP by visit, test and evaluator). With few records there are few checked records, and the rules table shows both numbers.
+A rule's share counts only *checked* records, meaning records that could contradict it. A lookup is scored on subjects it was not learnt from: the table is learnt on the odd-numbered subjects and checked on the even ones, then the other way round, so checked records are those whose key also occurs in the other half. Otherwise a table of many keys memorises which keys happened to carry a rare value (AELLT to AESHOSP: the hospitalised terms) without predicting it. A rule is proposed when it reproduces at least 90% of checked records, including half of the records that the most common value gets wrong, so a skewed target is not "explained" by an arbitrary input. Lookup keys are categories shared by at least two subjects per value on average, so a subject's own code is never a key; record numbers (--SEQ) are never keys either, nor is a number with more values than a category model keeps unless the spine copies it (DM.AGE is drawn anew, so a table keyed by age cannot cover the synthetic ages). In a scheduled dataset all its record keys together are also tried as one key, for values set by the schedule (RSLNKGRP by visit, test and evaluator). With few records there are few checked records, and the rules table shows both numbers.
 
 ## Time spine
 
@@ -55,14 +55,14 @@ DM has one record per subject. Findings (--TESTCD) and datasets with one record 
 `bench/eval/run.sh <label> [folder]` builds the study with the app's code, generates 254 subjects for seeds 1–3 and checks them with code kept apart from the app's:
 
 - **App checks**: the coherence checks the app runs itself.
-- **Relations**: mined on half of the real subjects and holding on the other half (date orders, functional dependencies, implications within and between datasets). One fails when fewer than 99% of synthetic subjects keep it in 2 of 3 seeds. Not counted: failures the real data already has as the app reads it (partial dates imputed), and in bench72 relations between a replica and a copy of the same domain (XA.XACLAS = CM.CMCLAS holds because XA copies CM).
+- **Relations**: mined on half of the real subjects and holding on the other half (date orders, functional dependencies, implications within and between datasets). One fails when fewer than 99% of synthetic subjects keep it in most seeds (2 of 3). Not counted: failures the real data already has as the app reads it (partial dates imputed), and in bench72 relations between a replica and a copy of the same domain (XA.XACLAS = CM.CMCLAS holds because XA copies CM).
 - **Fidelity**: mean total variation distance of categories and Kolmogorov–Smirnov distance of numbers, per variable.
 
 | | datasets | app checks failed | relations failing | mean TVD | mean KS |
 |---|---|---|---|---|---|
 | pilot | 10 | 0 of 127 | 9 | 0.050 | 0.090 |
 | bench28 | 28 | 0 of 255 | 32 | 0.041 | 0.087 |
-| bench72 | 72 | 0 of 762 | 3084 | 0.051 | 0.108 |
+| bench72 | 72 | 0 of 761 | 219 | 0.051 | 0.108 |
 
 bench72 builds in 305 s with 8 workers, 2.4 GB at most.
 
