@@ -207,10 +207,19 @@ fit_node <- function(ds, variable, frame, arm) {
     info <- design_info(records, used, c("VISITNUM", s$test))
     c(fit_part(y[i], design_matrix(info, records), type, design_groups(info)), list(info = info))
   })
+  # Implications are found within a test: the last visit gives PROTOCOL COMPLETED to the
+  # disposition event, not to the subject's other DS records.
   implications <- if (all(types == "categories")) {
     keys <- implication_keys(ds, frame)
     if (ds$name != "DM" && level == "subject") keys <- keys[!record_feature(keys)]
-    rbind(fit_implications(y, frame, keys), derived_implications(ds, variable, y, frame, keys))
+    do.call(rbind, lapply(split(seq_along(y), parts$scale), function(i) {
+      out <- rbind(fit_implications(y[i], frame[i, , drop = FALSE], keys), derived_implications(ds, variable, y[i], frame[i, , drop = FALSE], keys))
+      if (!NROW(out)) return(NULL)
+      within <- length(unique(parts$scale)) > 1
+      out$within <- if (within) s$test else NA_character_
+      out$part <- if (within) parts$scale[i[1]] else NA_character_
+      out
+    }))
   }
   reduced <- sum(vapply(fits, function(p) p$type != "tree" && length(p$columns) < length(design_groups(p$info)), TRUE))
   description <- sprintf("%s%s%s, %d %s%s%s", if (tree) sprintf("trees (%s leaves)", paste(range(vapply(fits, `[[`, 0L, "leaves")), collapse = "-"))

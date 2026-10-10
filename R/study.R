@@ -64,6 +64,14 @@ new_dataset <- function(study, name) {
       keys <- c(keys, extra[which.max(shares)])
       extra <- setdiff(extra, keys)
     }
+    # A text column that, with the keys, identifies the records of a subject (99%) and whose
+    # values recur across subjects (TULNKID, TRLNKID: T01, NT01, NEW01) names records like a
+    # test, whatever its number of values. The one with the fewest values.
+    if (unique_share(keys) < 0.99) {
+      names_records <- Filter(function(v) is.character(x[[v]]) && !endsWith(v, "SEQ") && unique_share(c(keys, v)) >= 0.99 &&
+        max(group_index(x, c("USUBJID", v))) >= 2 * length(unique(x[[v]])), setdiff(variables, c("USUBJID", keys, folded)))
+      if (length(names_records)) keys <- c(keys, names_records[which.min(vapply(x[names_records], function(v) length(unique(v)), 0L))])
+    }
     # A fixed category that the keys (visit aside) determine but the test alone does not (PCSPEC
     # by PCSEQ) is a key with them.
     groups <- function(columns) max(group_index(x, columns))

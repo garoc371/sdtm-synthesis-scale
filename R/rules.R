@@ -8,6 +8,11 @@
 # are proposed when they reproduce SHARE_TO_PROPOSE of at least two checked records, and
 # EXPLAINED_TO_PROPOSE of the records the most common value gets wrong: otherwise a skewed
 # target (99% "N") would appear determined by almost anything.
+#
+# A lookup table is scored on subjects it was not learned from: learned on half of the
+# subjects, checked on the other half, and the other way round. Otherwise a table of many
+# keys memorises which keys happened to carry a rare value (the AE terms that were
+# hospitalised) and reproduces the source without predicting anything.
 
 SHARE_TO_PROPOSE <- 0.9
 EXPLAINED_TO_PROPOSE <- 0.5
@@ -138,7 +143,8 @@ RULE_OPS <- list(
       text <- sprintf("%.*f", ifelse(is.na(digits), 0L, digits), values)
       trim <- !p$table$fixed[index] & grepl(".", text, fixed = TRUE)
       text[trim] <- sub("\\.?0+$", "", text[trim])
-      ifelse(is.na(values), NA, text)
+      # A result that is not a number ("PRESENT", "<5") is carried over as written.
+      ifelse(is.na(values), as.character(frame[[rule$inputs]]), text)
     },
     label = function(rule, input) {
       p <- rule$params
@@ -150,14 +156,15 @@ RULE_OPS <- list(
     groups = function(rule) rule$inputs,
     find = function(target, info) {
       y <- group_index(info$frame, target)
+      subject <- record_subject(info$frame)
       good <- vapply(info$key_groups, function(group) {
-        fit <- lookup_fit(group, y)
+        fit <- lookup_fit(group, y, subject)
         fit$checked >= 2 && isTRUE(fit$share >= SHARE_TO_PROPOSE - info$slack) && isTRUE(fit$explained >= EXPLAINED_TO_PROPOSE - info$slack)
       }, TRUE)
       info$keys[good]
     },
     learn = function(rule, frame) {
-      fit <- lookup_fit(group_index(frame, rule$inputs), group_index(frame, rule$target))
+      fit <- lookup_fit(group_index(frame, rule$inputs), group_index(frame, rule$target), record_subject(frame))
       table <- frame[fit$first, rule$inputs, drop = FALSE]
       table$value <- frame[[rule$target]][fit$first]
       rownames(table) <- NULL
@@ -166,6 +173,12 @@ RULE_OPS <- list(
     apply = function(rule, frame) {
       table <- rule$params$table
       table$value[match(key_strings(frame[rule$inputs]), key_strings(table[rule$inputs]))]
+    },
+    held_out = function(rule, frame) {
+      group <- group_index(frame, rule$inputs)
+      y <- group_index(frame, rule$target)
+      predicted <- held_out_prediction(group, y, record_subject(frame))
+      list(match = !is.na(predicted) & predicted == y, checked = !is.na(predicted))
     },
     label = function(rule, input) paste("Lookup by", paste(input, collapse = " and "))),
   # User expressions may only call the functions in EXPRESSION_FUNCTIONS.
@@ -213,6 +226,11 @@ evaluate_rule <- function(rule, frame) {
   group <- group_index(frame, if (!is.null(op$groups)) op$groups(rule))
   checked <- tabulate(group)[group] >= 2
   if (isTRUE(op$paired)) checked <- checked & !(is.na(values) & is.na(y))
+  if (!is.null(op$held_out) && is.null(rule$error) && !isTRUE(rule$params$edited)) {
+    held <- op$held_out(rule, frame)
+    match <- held$match
+    checked <- held$checked
+  }
   rule$share <- if (any(checked)) mean(match[checked]) else NA_real_
   rule$checked <- sum(checked)
   code <- match(y, unique(y))[checked]
@@ -251,9 +269,31 @@ range_class <- function(rule, frame) {
 # Share of the records the most common value (`base` of them) gets wrong that a rule reproduces.
 explained <- function(share, base) if (isTRUE(base < 1)) (share - base) / (1 - base) else share
 
+# Subject number of each record; each record its own subject in a dataset without subjects.
+record_subject <- function(frame) if ("USUBJID" %in% names(frame)) group_index(frame, "USUBJID") else seq_len(nrow(frame))
+
+# For each record, the most common target code of its key group among the other half of the
+# subjects (odd and even subject numbers); NA when no subject of the other half has the key.
+held_out_prediction <- function(group, y_code, subject) {
+  half <- subject %% 2 == 0
+  predicted <- rep(NA_integer_, length(group))
+  for (side in c(TRUE, FALSE)) {
+    from <- half != side
+    pair <- (group[from] - 1) * (max(y_code) + 1) + y_code[from]
+    count <- table(pair)
+    pair <- as.numeric(names(count))
+    best <- order(pair %/% (max(y_code) + 1), -count)
+    best <- best[!duplicated(pair[best] %/% (max(y_code) + 1))]
+    lookup <- rep(NA_integer_, max(group))
+    lookup[pair[best] %/% (max(y_code) + 1) + 1] <- as.integer(pair[best] %% (max(y_code) + 1))
+    predicted[half == side] <- lookup[group[half == side]]
+  }
+  predicted
+}
+
 # For each key group, its most common target code. `first` is the first record holding
-# that value; the shares count only groups with at least two records.
-lookup_fit <- function(group, y_code) {
+# that value; the shares are of the records predicted from the other half of the subjects.
+lookup_fit <- function(group, y_code, subject) {
   pair <- (group - 1) * (max(y_code) + 1) + y_code
   unique_pair <- unique(pair)
   first <- match(unique_pair, pair)
@@ -261,13 +301,12 @@ lookup_fit <- function(group, y_code) {
   pair_group <- group[first]
   best <- order(pair_group, -count)
   best <- best[!duplicated(pair_group[best])]
-  size <- tabulate(group)
-  checked_group <- size >= 2
-  total <- sum(size[checked_group])
-  matched <- sum(count[best][checked_group[pair_group[best]]])
-  share <- if (total) matched / total else NA
+  predicted <- held_out_prediction(group, y_code, subject)
+  checked <- !is.na(predicted)
+  total <- sum(checked)
+  share <- if (total) mean(predicted[checked] == y_code[checked]) else NA
   list(first = first[best], share = share, checked = total,
-    explained = explained(share, if (total) max(tabulate(y_code[checked_group[group]])) / total))
+    explained = explained(share, if (total) max(tabulate(y_code[checked])) / total))
 }
 
 # ---- Discovery -------------------------------------------------------------------------
@@ -331,6 +370,9 @@ discover_rules <- function(frame, targets, name) {
   # sex, the dose by arm and visit).
   for (by in intersect(c(s$test, s$visit), columns))
     keys <- c(keys, lapply(grep("^DM\\.", columns[is_key], value = TRUE), function(k) c(by, k)))
+  # Values set by the schedule: a table by all the record keys (RSLNKGRP by visit, test and
+  # evaluator).
+  if (length(s$keys) > 1 && all(s$keys %in% columns)) keys <- c(keys, list(s$keys))
   limits <- Filter(function(p) {
     lo <- frame[[p[1]]]
     hi <- frame[[p[2]]]
@@ -342,8 +384,10 @@ discover_rules <- function(frame, targets, name) {
   coded <- columns[is_key & values < 20]
   conversions <- lapply(setNames(searched, searched), function(target) {
     parsed <- !is.na(parse_number(frame[[target]]))
-    usable <- vapply(numbers, function(x) sum(!is.na(frame[[x]]) & parsed) >= 2, TRUE)
-    as.list(setdiff(numbers[usable], c(target, coded)))
+    # Inputs are columns of numbers, or text results that are mostly numbers (TRORRES).
+    inputs <- columns[numeric_like & kinds != "date" & !grepl("^(DM|N)\\.", columns)]
+    usable <- vapply(inputs, function(x) sum(!is.na(parse_number(frame[[x]])) & parsed) >= 2, TRUE)
+    as.list(setdiff(inputs[usable], c(target, coded)))
   })
   info <- list(frame = frame, kinds = kinds, values = values, numeric_like = numeric_like,
     missing = vapply(full, anyNA, TRUE), keys = keys, key_groups = lapply(keys, group_index, x = frame),

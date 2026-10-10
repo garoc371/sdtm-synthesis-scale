@@ -244,20 +244,27 @@ derived_implications <- function(ds, variable, y, frame, keys) {
   }))
 }
 
+# The rows an implication covers: those of its test, or all.
+implication_rows <- function(implications, i, frame) {
+  within <- implications$within[i]
+  if (is.null(within) || is.na(within)) rep(TRUE, nrow(frame)) else format_value(frame[[within]]) == implications$part[i]
+}
+
 # Rows breaking an implication: a forced key value with another value, or an "only" value with another key value.
 implication_violations <- function(implications, values, frame) {
   bad <- rep(FALSE, length(values))
   s <- level_string(values)
   for (i in seq_len(NROW(implications))) {
     key <- level_string(frame[[implications$key[i]]])
-    bad <- bad | if (implications$kind[i] == "forced") key %in% implications$level[[i]] & s != implications$value[[i]] else
-      s %in% implications$value[[i]] & !key %in% implications$level[[i]]
+    bad <- bad | implication_rows(implications, i, frame) & if (implications$kind[i] == "forced")
+      key %in% implications$level[[i]] & s != implications$value[[i]] else s %in% implications$value[[i]] & !key %in% implications$level[[i]]
   }
   bad
 }
 
 # "Only" values out of place are redrawn from the model a few times, then replaced by a
-# value drawn for another record that is allowed there; forced values are then set.
+# value drawn for another record of the same test that is allowed there; forced values are
+# then set.
 apply_implications <- function(implications, values, frame, redraw) {
   if (is.null(implications)) return(values)
   only <- implications[implications$kind == "only", , drop = FALSE]
@@ -268,18 +275,19 @@ apply_implications <- function(implications, values, frame, redraw) {
     values[bad] <- redraw(bad)
     bad <- bad[misplaced(values[bad], bad)]
   }
-  if (length(bad)) {
-    pool <- level_string(values[-bad])
-    options <- values[-bad][!duplicated(pool)]
+  within <- stats::na.omit(implications$within)[1]
+  test <- if (length(within) && !is.na(within)) format_value(frame[[within]]) else rep("", length(values))
+  for (i in bad) {
+    same <- setdiff(which(test == test[i]), bad)
+    pool <- level_string(values[same])
+    options <- values[same][!duplicated(pool)]
     weight <- tabulate(match(pool, unique(pool)))
-    for (i in bad) {
-      ok <- which(!misplaced(options, rep(i, length(options))))
-      if (length(ok)) values[i] <- options[ok[sample.int(length(ok), 1, prob = weight[ok])]]
-    }
+    ok <- which(!misplaced(options, rep(i, length(options))))
+    if (length(ok)) values[i] <- options[ok[sample.int(length(ok), 1, prob = weight[ok])]]
   }
   forced <- implications[implications$kind == "forced", , drop = FALSE]
   for (i in seq_len(nrow(forced))) {
-    rows <- level_string(frame[[forced$key[i]]]) %in% forced$level[[i]]
+    rows <- level_string(frame[[forced$key[i]]]) %in% forced$level[[i]] & implication_rows(forced, i, frame)
     values[rows] <- forced$typed[[i]]
   }
   values
@@ -287,7 +295,8 @@ apply_implications <- function(implications, values, frame, redraw) {
 
 implication_label <- function(r) {
   level <- r$level[[1]]
-  if (r$kind == "forced") return(sprintf("%s = %s gives %s", display_name(r$key), level, r$value[[1]]))
-  sprintf("%s only where %s %s", if (is.na(r$via)) r$value[[1]] else r$via, display_name(r$key),
-    if (length(level) == 1) paste("=", level) else sprintf("in {%s}", paste(level, collapse = ", ")))
+  test <- if (!is.null(r$within) && !is.na(r$within)) sprintf(" (%s %s)", r$within, r$part) else ""
+  if (r$kind == "forced") return(sprintf("%s = %s gives %s%s", display_name(r$key), level, r$value[[1]], test))
+  sprintf("%s only where %s %s%s", if (is.na(r$via)) r$value[[1]] else r$via, display_name(r$key),
+    if (length(level) == 1) paste("=", level) else sprintf("in {%s}", paste(level, collapse = ", ")), test)
 }
