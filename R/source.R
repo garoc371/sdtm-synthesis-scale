@@ -3,9 +3,6 @@
 # Internally every dataset is a data.frame in which blanks are NA, dates are Date objects
 # and everything else keeps its source type.
 
-# Fixed dataset order: subjects and their visits first, then exposure and disposition, findings,
-# events and history. Visit datasets take their visits and dates from SV, so SV comes early.
-DATASET_ORDER <- c("DM", "SV", "SE", "EX", "EC", "DS", "VS", "LB", "EG", "QS", "AE", "CE", "CM", "MH")
 MISSING <- "(missing)"
 
 read_folder <- function(directory) {
@@ -15,8 +12,7 @@ read_folder <- function(directory) {
 }
 
 # Labels come from the files, or from define.xml item definitions (OIDs of the form
-# IT.<DATASET>.<VARIABLE>) when one is given. Partial ISO dates (e.g. "2013-04") cannot
-# be placed on a day scale and become missing.
+# IT.<DATASET>.<VARIABLE>) when one is given. Partial ISO dates are imputed (`impute_dates()`).
 read_source <- function(files, names = basename(files)) {
   ext <- tolower(tools::file_ext(names))
   tables <- which(ext %in% c("xpt", "sas7bdat", "csv"))
@@ -28,7 +24,6 @@ read_source <- function(files, names = basename(files)) {
   })
   names(data) <- toupper(tools::file_path_sans_ext(names[tables]))
   if (!"DM" %in% names(data)) stop("DM is required: every other dataset links to it through USUBJID.")
-  data <- data[c(intersect(DATASET_ORDER, names(data)), sort(setdiff(names(data), DATASET_ORDER)))]
   labels <- lapply(data, function(x) vapply(x, function(v) attr(v, "label") %||% "", ""))
   define <- files[ext == "xml"][1]
   if (!is.na(define)) {
@@ -46,11 +41,138 @@ read_source <- function(files, names = basename(files)) {
       # SAS transport files are often Latin-1.
       if (is.character(v)) v[!validUTF8(v)] <- iconv(v[!validUTF8(v)], "latin1", "UTF-8")
       if (is.character(v)) v[!nzchar(trimws(v))] <- NA
-      if (grepl("DTC$|DTM$", name)) as_date(v) else v
+      v
     })
     x
   })
-  list(data = data, labels = labels)
+  list(data = impute_dates(data), labels = labels)
+}
+
+# ---- Dates ------------------------------------------------------------------------------
+
+# Every --DTC column becomes a Date. A partial date is imputed: a missing day is the 15th and
+# a missing month July (2013-04 gives 2013-04-15, 2013 gives 2013-07-15); without a year the
+# date stays missing. The time of day is dropped. An imputed date then moves within its stated
+# period, as little as needed, so that the date orders of the source hold for it too (see
+# `date_orders()`): a medication's start stays on or before its end, a history date before
+# the first dose, and a visit's date between the dates of the visits before and after it.
+impute_dates <- function(data) {
+  partial <- list()
+  for (d in names(data)) for (v in grep("DTC$|DTM$", names(data[[d]]), value = TRUE)) {
+    text <- substr(as.character(data[[d]][[v]]), 1, 10)
+    month <- grepl("^\\d{4}-\\d{2}$", text)
+    year <- grepl("^\\d{4}$", text)
+    data[[d]][[v]] <- as.Date(ifelse(month, paste0(text, "-15"), ifelse(year, paste0(text, "-07-15"), text)), format = "%Y-%m-%d")
+    if (!any(month | year)) next
+    rows <- which(month | year)
+    lo <- as.Date(ifelse(month, paste0(text, "-01"), paste0(text, "-01-01"))[rows], format = "%Y-%m-%d")
+    hi <- as.Date(ifelse(month[rows], format(lo + 31, "%Y-%m-01"), format(lo + 366, "%Y-01-01")), format = "%Y-%m-%d") - 1
+    partial[[d]][[v]] <- data.frame(row = rows, lo = lo, hi = hi)
+  }
+  if (!length(partial)) return(data)
+  orders <- date_orders(data, partial)
+  # Bounds may come from other imputed dates, so a few passes settle them.
+  for (pass in 1:3) for (d in names(partial)) for (v in names(partial[[d]])) {
+    p <- partial[[d]][[v]]
+    bounds <- date_bounds(data, d, v, orders[orders$dataset == d & (orders$a == v | orders$b == v), , drop = FALSE])
+    # A bound outside the stated period (an event recorded as starting in 2003, years before
+    # the study) is an exception of the source that the date keeps.
+    lower <- bounds$lower[p$row]
+    upper <- bounds$upper[p$row]
+    lower[lower > as.numeric(p$hi)] <- NA
+    upper[upper < as.numeric(p$lo)] <- NA
+    x <- as.numeric(data[[d]][[v]][p$row])
+    data[[d]][[v]][p$row] <- as.Date(pmin(pmax(x, lower, na.rm = TRUE), upper, na.rm = TRUE))
+  }
+  data
+}
+
+DATE_ORDER_SHARE <- 0.99
+DATE_ORDER_RECORDS <- 10
+
+# Orders a <= b that hold on at least 99% of the source's complete dates (at least 10 records),
+# for the columns that have imputed dates: two dates of a record ("record"), a record's date
+# and its subject's DM date ("DM.<column>" as a or b), and a date over the visits of a subject
+# ("visit": the date of a later VISITNUM is not earlier).
+date_orders <- function(data, partial) {
+  rows <- list()
+  complete <- function(d, v) {
+    ok <- !is.na(data[[d]][[v]])
+    ok[partial[[d]][[v]]$row] <- FALSE
+    ok
+  }
+  holds <- function(a, b, ok) sum(ok) >= DATE_ORDER_RECORDS && mean(a[ok] <= b[ok]) >= DATE_ORDER_SHARE
+  for (d in names(partial)) {
+    x <- data[[d]]
+    dates <- names(Filter(function(v) inherits(v, "Date"), x))
+    dm <- if (d != "DM") data$DM[match(x$USUBJID, data$DM$USUBJID), , drop = FALSE]
+    dm_dates <- if (d != "DM") names(Filter(function(v) inherits(v, "Date"), dm))
+    for (v in names(partial[[d]])) {
+      for (w in setdiff(dates, v)) {
+        ok <- complete(d, v) & complete(d, w)
+        if (holds(x[[w]], x[[v]], ok)) rows[[length(rows) + 1]] <- data.frame(dataset = d, a = w, b = v, kind = "record")
+        if (holds(x[[v]], x[[w]], ok)) rows[[length(rows) + 1]] <- data.frame(dataset = d, a = v, b = w, kind = "record")
+      }
+      for (w in dm_dates) {
+        ok <- complete(d, v) & !is.na(dm[[w]])
+        if (holds(dm[[w]], x[[v]], ok)) rows[[length(rows) + 1]] <- data.frame(dataset = d, a = paste0("DM.", w), b = v, kind = "record")
+        if (holds(x[[v]], dm[[w]], ok)) rows[[length(rows) + 1]] <- data.frame(dataset = d, a = v, b = paste0("DM.", w), kind = "record")
+      }
+      if (!is.null(x$VISITNUM)) {
+        ok <- complete(d, v) & !is.na(x$VISITNUM)
+        bounds <- visit_bounds(x$USUBJID[ok], x$VISITNUM[ok], as.numeric(x[[v]][ok]))
+        later <- !is.na(bounds$lower)
+        if (sum(later) >= DATE_ORDER_RECORDS && mean(bounds$lower[later] <= as.numeric(x[[v]][ok][later])) >= DATE_ORDER_SHARE)
+          rows[[length(rows) + 1]] <- data.frame(dataset = d, a = v, b = v, kind = "visit")
+      }
+    }
+  }
+  do.call(rbind, rows) %||% data.frame(dataset = character(), a = character(), b = character(), kind = character())
+}
+
+# Each record's latest date at an earlier visit of its subject and earliest date at a later one.
+visit_bounds <- function(subject, visit, date) {
+  o <- order(subject, visit)
+  s <- subject[o]
+  k <- visit[o]
+  x <- date[o]
+  group <- cumsum(!duplicated(data.frame(s, k)))
+  first <- !duplicated(s)
+  run <- function(values, f, reverse = FALSE) {
+    # Per visit group: f over the group, then a running f over the subject's earlier (later) groups.
+    g <- tapply(values, group, f, na.rm = TRUE)
+    g[!is.finite(g)] <- NA
+    gs <- s[!duplicated(group)]
+    out <- if (reverse) rev(stats::ave(rev(g), rev(gs), FUN = function(z) c(NA, cumf(z, f)[-length(z)])))
+      else stats::ave(g, gs, FUN = function(z) c(NA, cumf(z, f)[-length(z)]))
+    out[group]
+  }
+  lower <- upper <- numeric(length(x))
+  lower[o] <- run(x, max)
+  upper[o] <- run(x, min, reverse = TRUE)
+  list(lower = lower, upper = upper)
+}
+
+cumf <- function(z, f) Reduce(function(a, b) if (is.na(a)) b else if (is.na(b)) a else f(a, b), z, accumulate = TRUE)
+
+# Lower and upper bounds of column v of dataset d on every record, from its orders.
+date_bounds <- function(data, d, v, orders) {
+  x <- data[[d]]
+  n <- nrow(x)
+  lower <- upper <- rep(NA_real_, n)
+  value <- function(column) {
+    if (startsWith(column, "DM.")) as.numeric(data$DM[[substring(column, 4)]][match(x$USUBJID, data$DM$USUBJID)])
+    else as.numeric(x[[column]])
+  }
+  for (i in seq_len(nrow(orders))) {
+    if (orders$kind[i] == "visit") {
+      b <- visit_bounds(x$USUBJID, x$VISITNUM, as.numeric(x[[v]]))
+      lower <- pmax(lower, b$lower, na.rm = TRUE)
+      upper <- pmin(upper, b$upper, na.rm = TRUE)
+    } else if (orders$b[i] == v) lower <- pmax(lower, value(orders$a[i]), na.rm = TRUE)
+    else upper <- pmin(upper, value(orders$b[i]), na.rm = TRUE)
+  }
+  list(lower = lower, upper = upper)
 }
 
 as_date <- function(x) {

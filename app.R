@@ -43,7 +43,7 @@ ui <- bslib::page_sidebar(
     section("Policy",
       sliderInput("policy", "Accept found rules reproducing at least", 90, 100, 100 * POLICY_SHARE, step = 1, post = "%",
         ticks = FALSE),
-      hint("Applies to every dataset. Rules below it are rejected and their targets sampled. Standard SDTM rules and changes made by hand are kept.")),
+      hint("Applies to every dataset. Rules below it are rejected and their targets sampled. Changes made by hand are kept.")),
     section("Sample",
       bslib::layout_columns(col_widths = c(6, 6),
         numericInput("n_subjects", "Subjects", 200, min = 1, step = 50),

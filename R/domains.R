@@ -28,16 +28,11 @@ domain_class <- function(name, x) {
   if (has("TESTCD")) "findings" else if (has("TRT")) "interventions" else if (has(c("TERM", "DECOD"))) "events" else "other"
 }
 
-# Known domains keep the fixed order of DATASET_ORDER (split datasets take their domain's
-# place); other datasets follow the last known domain of their class, then by name.
+# Datasets in class order (CLASSES), then by name: DM first, as every other dataset's subjects
+# and inputs come from it. The order only decides which record counts (N.*) a dataset may use.
 order_datasets <- function(data) {
-  prefix <- mapply(domain_prefix, names(data), data)
   class <- mapply(domain_class, names(data), data)
-  slot <- c(subject = "DM", special = "SV", interventions = "CM", events = "CE", findings = "QS", other = "MH")
-  rank <- match(prefix, DATASET_ORDER)
-  rank[is.na(rank)] <- match(slot[class[is.na(rank)]], DATASET_ORDER) + 0.5
-  rank[is.na(rank)] <- length(DATASET_ORDER) + 1
-  names(data)[order(rank, names(data))]
+  names(data)[order(match(class, names(CLASSES)), names(data))]
 }
 
 # The source as the study uses it: SUPP-- datasets folded into their parents, datasets

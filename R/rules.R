@@ -117,11 +117,14 @@ RULE_OPS <- list(
         exact <- c(if (length(ok)) stats::median(y_number[ok] / x[ok]) else 1, 0)
         if (length(unique(x[ok])) > 1 && share(exact) < 0.9) exact <- unname(stats::coef(stats::lm(y_number[ok] ~ x[ok])))[2:1]
         options <- lapply(3:6, function(d) signif(exact, d))
+        # A test without a number on both sides (all "NEGATIVE") keeps the plain copy.
         shares <- vapply(options, share, 0)
+        shares[is.na(shares)] <- 0
         best <- options[[which(shares >= max(shares) - 1e-9)[1]]]
         text <- y[i][!is.na(y_number[i])]
-        # Text results keep trailing zeros ("5.10") only when the source does.
-        fixed <- is.character(y) && digits > 0 && length(text) && mean(grepl(sprintf("\\.[0-9]{%d}$", digits), text)) >= 0.5
+        # Text results keep trailing zeros ("5.10") only when the source has any; without them
+        # ("1.01" beside "1.003") the shortest form is written.
+        fixed <- is.character(y) && digits > 0 && any(grepl("\\.[0-9]*0$", text))
         data.frame(factor = best[1], offset = best[2], digits = digits, fixed = fixed)
       })
       list(by = by, text = is.character(y), table = cbind(frame[match(seq_along(rows), group), by, drop = FALSE], do.call(rbind, rows), row.names = NULL))
@@ -176,57 +179,6 @@ RULE_OPS <- list(
       if (length(values) == 1) rep(values, nrow(frame)) else values
     },
     label = function(rule, input) rule$params$text))
-
-# Rules the SDTM standard defines, known before the data are read. "--" is the dataset
-# prefix (AE in AE) and "DM." a DM variable; "-" means no inputs, and an expression lists
-# its own. A standard rule is one rule named in advance rather than the best of many tried,
-# so it is accepted when it reproduces SHARE_TO_PROPOSE of its checked records, without the
-# search's test against the most common value. The first rule that holds for a target wins;
-# the search covers the targets left.
-STANDARD_RULES <- utils::read.table(header = TRUE, stringsAsFactors = FALSE, text = "
-  target    op           inputs
-  STUDYID   constant     -
-  DOMAIN    constant     -
-  --SEQ     sequence     -
-  VISIT     lookup       VISITNUM
-  VISITDY   lookup       VISITNUM
-  ARM       lookup       ARMCD
-  ACTARM    lookup       ACTARMCD
-  DTHFL     expression   'ifelse(is.na(DTHDTC), NA, \"Y\")'
-  --DY      study_day    --DTC,DM.RFSTDTC
-  --STDY    study_day    --STDTC,DM.RFSTDTC
-  --ENDY    study_day    --ENDTC,DM.RFSTDTC
-  --TEST    lookup       --TESTCD
-  --CAT     lookup       --TESTCD
-  --SCAT    lookup       --TESTCD
-  --STRESU  lookup       --TESTCD
-  --STRESC  convert      --STRESN
-  --ORRES   convert      --STRESN
-  --ORNRLO  convert      --STNRLO
-  --ORNRHI  convert      --STNRHI
-  --NRIND   range_flag   --STRESN,--STNRLO,--STNRHI
-  --BLFL    record_flag  --DTC,DM.RFSTDTC
-  --STAT    expression   'ifelse(is.na(--ORRES), \"NOT DONE\", NA)'
-  --TPTNUM  lookup       --TPT
-  --ELTM    lookup       --TPT
-  --TPTREF  lookup       --TPT
-  --LLT     lookup       --TERM
-  --DECOD   lookup       --LLT
-  --DECOD   lookup       --TERM
-  --DECOD   lookup       --TRT
-  --LLTCD   lookup       --LLT
-  --PTCD    lookup       --DECOD
-  --HLT     lookup       --DECOD
-  --HLTCD   lookup       --HLT
-  --HLGT    lookup       --HLT
-  --HLGTCD  lookup       --HLGT
-  --BODSYS  lookup       --DECOD
-  --BDSYCD  lookup       --BODSYS
-  --SOC     lookup       --BODSYS
-  --SOCCD   lookup       --SOC
-  --CLAS    lookup       --DECOD
-  --CLASCD  lookup       --CLAS
-")
 
 new_rule <- function(target, op, inputs = character(), params = list(), origin = "found") {
   list(target = target, op = op, inputs = inputs, params = params, origin = origin,
@@ -338,8 +290,7 @@ discovery_sample <- function(frame, cap) {
 }
 
 # Rules for a dataset frame. `targets` are the dataset's own variables; every frame column
-# may serve as an input. Standard rules that hold are accepted first; the other targets are
-# searched. Search candidates per target are ranked by share, then operation preference,
+# may serve as an input. Every target is searched; candidates per target are ranked by share, then operation preference,
 # then checked records and fewer inputs, and are proposed for review. Above DISCOVERY_RECORDS
 # records the search runs on a sample of subjects and the shortlisted candidates are then
 # checked, and their tables learned, on every record.
@@ -351,18 +302,6 @@ discover_rules <- function(frame, targets, name) {
   targets <- targets[vapply(frame[targets], function(v) any(!is.na(v)), TRUE)]
   if (nrow(frame) < 2 || !length(targets)) return(list())
   chosen <- list()
-  for (i in seq_len(nrow(STANDARD_RULES))) {
-    row <- lapply(STANDARD_RULES[i, ], function(x) {
-      x <- gsub("--", name, x, fixed = TRUE)
-      if (name == "DM") gsub("DM.", "", x, fixed = TRUE) else x
-    })
-    expression <- row$op == "expression"
-    inputs <- if (expression) all.vars(parse(text = row$inputs)) else setdiff(strsplit(row$inputs, ",")[[1]], "-")
-    if (!row$target %in% setdiff(targets, names(chosen)) || !all(inputs %in% names(frame))) next
-    rule <- evaluate_rule(new_rule(row$target, row$op, inputs, if (expression) list(text = row$inputs) else list(), "standard"), frame)
-    rule$status <- "accepted"
-    if (isTRUE(rule$share >= SHARE_TO_PROPOSE) && rule$checked >= 2) chosen[[row$target]] <- rule
-  }
   searched <- setdiff(targets, names(chosen))
   # What a column is (kind, number of values, record numbering) is read from every record,
   # which is cheap: a rare value or a few unnumbered subjects must not change it. The
@@ -388,8 +327,10 @@ discover_rules <- function(frame, targets, name) {
   is_key <- kinds != "date" & !(numeric_like & values > 50) & values >= 2 &
     subject_values >= 2 * (if (sampled) count_values(frame) else values) & columns != "USUBJID" & !numbered
   keys <- as.list(columns[is_key])
-  # Per-test tables that also differ by a subject characteristic (ranges by sex).
-  if (!is.null(s$test)) keys <- c(keys, lapply(grep("^DM\\.", columns[is_key], value = TRUE), function(k) c(s$test, k)))
+  # Per-test and per-visit tables that also differ by a subject characteristic (ranges by
+  # sex, the dose by arm and visit).
+  for (by in intersect(c(s$test, s$visit), columns))
+    keys <- c(keys, lapply(grep("^DM\\.", columns[is_key], value = TRUE), function(k) c(by, k)))
   limits <- Filter(function(p) {
     lo <- frame[[p[1]]]
     hi <- frame[[p[2]]]

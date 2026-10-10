@@ -1,5 +1,5 @@
 # A dataset's graph and variables: the node panel edits one sampled node; the variables
-# table changes types; the settings change inputs, record counts, windows and order. Any
+# table changes types; the settings change inputs and order. Any
 # change makes the dataset kept as set by hand, rebuilt alone.
 
 graph_tab_ui <- function() bslib::card(full_screen = TRUE, class = "graph-card",
@@ -100,19 +100,11 @@ graph_tab_server <- function(input, output, session, b, current, change, notify)
     study <- b$study
     s <- ds$structure
     choices <- input_choices(study, ds$name)
-    dates <- c(choices[choices %in% paste0("DM.", names(which(study$datasets$DM$kinds == "date")))], subject_date_nodes(study, ds$name))
-    window_choices <- c("None" = "", setNames(dates, display_name(dates)))
     tagList(
       if (ds$name != "DM") checkboxInput("ds_include", "Generate this dataset", ds$include),
       div(class = "d-flex gap-2 small", strong("Records"), span(record_structure_label(ds))),
-      if (ds$name != "DM") tagList(
-        selectizeInput("ds_inputs", "Inputs from DM and earlier datasets", setNames(choices, display_name(choices)),
-          ds$inputs, multiple = TRUE, options = list(plugins = list("remove_button"))),
-        if (s$type %in% c("count", "series")) selectizeInput("ds_count_predictors", "Records per subject depend on",
-          setNames(choices, display_name(choices)), s$predictors, multiple = TRUE, options = list(plugins = list("remove_button"))),
-        if (any(ds$kinds == "date")) bslib::layout_columns(col_widths = c(6, 6),
-          selectInput("ds_window_start", "Dates on or after", window_choices, ds$window$start),
-          selectInput("ds_window_end", "Dates on or before", window_choices, ds$window$end))),
+      if (ds$name != "DM") selectizeInput("ds_inputs", "Inputs from DM, earlier datasets and the spine", setNames(choices, display_name(choices)),
+        ds$inputs, multiple = TRUE, options = list(plugins = list("remove_button"))),
       selectizeInput("ds_order", "Order of sampled variables", ds$order, ds$order, multiple = TRUE,
         options = list(plugins = list("drag_drop", "remove_button"))),
       hint("Drag to reorder and save: each sampled variable is then predicted by the informative ones before it."),
@@ -123,8 +115,6 @@ graph_tab_server <- function(input, output, session, b, current, change, notify)
     if (ds$name != "DM") {
       ds$include <- isTRUE(input$ds_include)
       ds$inputs <- as.character(input$ds_inputs)
-      if (ds$structure$type %in% c("count", "series")) ds$structure$predictors <- as.character(input$ds_count_predictors)
-      if (!is.null(input$ds_window_start)) ds$window <- list(start = input$ds_window_start, end = input$ds_window_end)
     }
     order <- as.character(input$ds_order)
     if (!identical(order, ds$order) && length(order)) ds <- starting_graph(b$study, ds, order)
@@ -162,44 +152,33 @@ graph_tab_server <- function(input, output, session, b, current, change, notify)
     formula <- div(class = "font-monospace small text-break bg-body-tertiary border rounded px-2 py-2 mb-3", node_formula(ds, v, fit))
     if (!identical(type, "sampled") && !identical(type, "identifier") && !identical(type, "blank"))
       return(div(class = "node-panel", header, formula,
-        hint(if (identical(type, "rule")) "Calculated variables are edited in the Rules tab." else "Keys come from the record structure.")))
+        hint(if (identical(type, "rule")) "Calculated variables are edited in the Rules tab." else "Keys and timing are copied from the donor's spine.")))
     node <- ds$nodes[[v]]
     # Possible parents: generated nodes and inputs that do not already depend on this node.
     choices <- setdiff(c(generated_variables(ds), input_choices(b$study, ds$name)), c(v, "USUBJID"))
     choices <- setdiff(choices, descendants(ds, v))
-    dm_kinds <- b$study$datasets$DM$kinds
-    is_date_choice <- vapply(choices, function(p) identical(unname(c(ds$kinds, setNames(dm_kinds, paste0("DM.", names(dm_kinds))))[p]), "date"), TRUE)
-    date_choices <- choices[is_date_choice]
-    predictor_choices <- choices[!is_date_choice]
-    is_date <- identical(ds$kinds[[v]], "date")
-    anchor <- if (is_date && length(node$predictors) && node$predictors[1] %in% date_choices) node$predictors[1] else ""
     arm <- arm_variable(b$study$datasets$DM)
-    is_arm <- ds$name == "DM" && identical(v, arm)
-    editable <- identical(type, "sampled") && !is_arm
+    editable <- identical(type, "sampled")
     div(class = "node-panel", header, formula,
       bslib::layout_columns(col_widths = 12,
         selectInput("node_type", "Type", c(Sampled = "sampled", Identifier = "identifier", `Not generated` = "blank"), type),
-        if (editable) selectizeInput("node_predictors", "Predictors", setNames(predictor_choices, display_name(predictor_choices)),
-          setdiff(node$predictors, anchor), multiple = TRUE, options = list(plugins = list("remove_button")))),
+        if (editable) selectizeInput("node_predictors", "Predictors", setNames(choices, display_name(choices)),
+          node$predictors, multiple = TRUE, options = list(plugins = list("remove_button")))),
       if (editable) bslib::layout_columns(col_widths = 12,
-        if (is_date) selectInput("node_anchor", "Days after", c("No anchor (calendar date)" = "",
-          setNames(date_choices, display_name(date_choices))), anchor) else
-          selectInput("node_model", "Model", setNames(names(NODE_MODELS), NODE_MODELS), node$model),
-        if (!is_date && !is.null(ds$structure$visit) && ds$levels[[v]] == "record")
+        selectInput("node_model", "Model", setNames(names(NODE_MODELS), NODE_MODELS), node$model),
+        if (!is.null(ds$structure$visit) && ds$levels[[v]] == "record")
           checkboxInput("node_prev", "Depends on the previous value", isTRUE(node$prev)),
         if (!is.na(arm)) checkboxInput("node_vary", "Draw arm effects from their uncertainty", isTRUE(node$vary))),
-      if (is_arm) hint("The arm is drawn from the allocation ratio in the source."),
       actionButton("apply_node", "Apply", class = "btn-sm btn-primary"))
   })
   observeEvent(input$apply_node, guarded(notify, {
     ds <- current()
     v <- req(node())
     n <- ds$nodes[[v]]
-    editable <- identical(node_type(ds, v), "sampled") && !(ds$name == "DM" && identical(v, arm_variable(ds)))
+    editable <- identical(node_type(ds, v), "sampled")
     n$type <- input$node_type
     if (editable) {
-      anchor <- input$node_anchor %||% ""
-      n$predictors <- unique(c(if (nzchar(anchor)) anchor, setdiff(as.character(input$node_predictors), anchor)))
+      n$predictors <- as.character(input$node_predictors)
       if (!is.null(input$node_model)) n$model <- input$node_model
       n$prev <- isTRUE(input$node_prev)
       n$vary <- isTRUE(input$node_vary)

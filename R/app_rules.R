@@ -7,8 +7,7 @@ rules_tab_ui <- function() bslib::card(full_screen = TRUE,
     div(class = "d-flex align-items-center gap-2", uiOutput("rules_title", inline = TRUE),
       bslib::popover(tags$button(type = "button", class = "btn btn-link btn-sm p-0 text-body-secondary", `aria-label` = "How rules are found",
         icon("circle-info")), title = "How rules are found",
-        HTML(paste0("<b>SDTM standard</b> rules (VISIT from VISITNUM, study days, the MedDRA hierarchy, …) are known in advance and ",
-          "accepted when they reproduce ", 100 * SHARE_TO_PROPOSE, "% of checked records. The remaining columns are searched.<br><br>",
+        HTML(paste0("Every column is searched for a rule that computes it from other columns of the record, its subject (DM.*) or its record counts (N.*).<br><br>",
           "A rule's <b>reproduced</b> share counts only <b>checked</b> records: records that could contradict it. ",
           "For a lookup, that means records whose key value occurs at least twice. A key seen once fits any table, so it is not evidence. ",
           "Found rules need ", 100 * SHARE_TO_PROPOSE, "% reproduced, including ", 100 * EXPLAINED_TO_PROPOSE,
@@ -38,11 +37,11 @@ rules_tab_server <- function(input, output, session, b, current, change, notify)
       sum(statuses == "accepted"), sum(statuses == "rejected"), sum(vapply(ds$rules, function(r) isTRUE(r$manual), TRUE)))))
   })
 
-  # Rules set by hand first, then found ones, then the standard ones.
+  # Rules set by hand first, then found ones.
   shown_rules <- reactive({
     rules <- req(current())$rules
     origin <- vapply(rules, function(r) if (isTRUE(r$manual)) "hand" else r$origin %||% "hand", "")
-    rules[order(match(origin, c("hand", "found", "standard")), -vapply(rules, function(r) r$share %||% 1, 0))]
+    rules[order(match(origin, c("hand", "found")), -vapply(rules, function(r) r$share %||% 1, 0))]
   })
   output$rules_table <- DT::renderDT({
     if (!length(shown_rules())) return(compact_table(data.frame(Message = "No rules found in this dataset.")))
@@ -54,9 +53,8 @@ rules_tab_server <- function(input, output, session, b, current, change, notify)
       Inputs = vapply(rules, function(r) htmltools::htmlEscape(paste(display_name(rule_columns(r)), collapse = ", ")), ""),
       Reproduced = vapply(rules, function(r) share_bar(r$share), ""),
       Checked = vapply(rules, function(r) format(r$checked, big.mark = ","), ""),
-      Source = vapply(rules, function(r) switch(r$origin %||% "user", standard = "SDTM standard", user = "added", "found"), ""),
-      `Set by` = vapply(rules, function(r) if (isTRUE(r$manual) || identical(r$origin, "user")) "hand" else
-        if (identical(r$origin, "standard")) "standard" else "policy", ""),
+      Source = vapply(rules, function(r) switch(r$origin %||% "user", user = "added", "found"), ""),
+      `Set by` = vapply(rules, function(r) if (isTRUE(r$manual) || identical(r$origin, "user")) "hand" else "policy", ""),
       stringsAsFactors = FALSE)
     compact_table(table, selection = "multiple", escape = FALSE)
   })

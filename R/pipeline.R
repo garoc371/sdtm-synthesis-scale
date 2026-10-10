@@ -17,7 +17,7 @@
 POLICY_SHARE <- 0.9
 
 # The files a worker needs: no Shiny.
-CORE_FILES <- c("source.R", "domains.R", "supp.R", "rules.R", "study.R", "models.R", "generate.R", "review.R", "pipeline.R")
+CORE_FILES <- c("source.R", "domains.R", "supp.R", "rules.R", "spine.R", "study.R", "models.R", "generate.R", "review.R", "pipeline.R")
 
 resolve_rules <- function(ds, share) {
   for (t in names(ds$rules)) if (identical(ds$rules[[t]]$origin, "found") && !isTRUE(ds$rules[[t]]$manual))
@@ -55,7 +55,7 @@ start_workers <- function(n, dir = "R") {
 
 content_key <- function(...) digest::digest(list(...), algo = "xxhash64")
 
-code_version <- function(dir = "R") content_key(lapply(file.path(dir, CORE_FILES), readLines))
+code_version <- function(dir = "R") content_key(lapply(file.path(dir, CORE_FILES), readLines), default_node_model())
 
 cache_file <- function(dir, key) file.path(dir, paste0(key, ".rds"))
 
@@ -82,7 +82,10 @@ save_cached <- function(dir, key, value) {
 
 load_study <- function(files, names = basename(files)) {
   source <- if (length(files) == 1 && dir.exists(files)) read_folder(files) else read_source(files, names)
-  study <- new_study(organise_source(source))
+  source <- organise_source(source)
+  source$data <- shift_dates(source$data)
+  study <- new_study(source)
+  study$spine <- spine_records(study)
   study$hashes <- vapply(study$source$data, digest::digest, "", algo = "xxhash64")
   study
 }
@@ -184,7 +187,7 @@ reset_dataset <- function(b, name) {
   invisible(b)
 }
 
-# What generation needs, without source records (see `generate_study()`).
+# What generation needs: no source records beyond the spine (see `generate_study()`).
 build_bundle <- function(b) c(generation_bundle(b), list(seed = b$seed, created = Sys.time()))
 
 set_sample <- function(b, n, seed) {
@@ -193,14 +196,14 @@ set_sample <- function(b, n, seed) {
   invisible(b)
 }
 
-# What a worker needs for one dataset: its records, DM's and SV's, the subjects and dates of
-# earlier datasets for their record counts and timeline nodes, and DM's graph for the arm.
+# What a worker needs for one dataset: its records, DM's and SV's (the spine features), the
+# subjects of earlier datasets for their record counts, and DM's graph for the arm.
 job_study <- function(study, name) {
   keep <- c("DM", VISIT_HUB, name)
   earlier <- earlier_datasets(study, name)
   s <- study[c("source", "datasets")]
   s$source$data[setdiff(names(s$source$data), keep)] <- lapply(s$source$data[setdiff(names(s$source$data), keep)],
-    function(x) x[c("USUBJID", names(Filter(function(v) inherits(v, "Date"), x)))])
+    function(x) x["USUBJID"])
   s$datasets <- s$datasets[intersect(names(s$datasets), union(keep, earlier))]
   s$datasets[setdiff(names(s$datasets), keep)] <- lapply(s$datasets[setdiff(names(s$datasets), keep)], function(ds) ds["include"])
   s$fits <- list()
@@ -218,8 +221,8 @@ dataset_keys <- function(b, name) {
   ds <- study$datasets[[name]]
   dm <- study$datasets$DM
   earlier <- earlier_datasets(study, name)
-  context <- list(b$code, study$hashes[intersect(c(name, "DM", VISIT_HUB, earlier), names(study$hashes))], if (name != "DM") list(treatment_variable(dm),
-    variables_of_type(dm, c("rule", "sampled", "identifier")), earlier[vapply(study$datasets[earlier], `[[`, TRUE, "include")]))
+  context <- list(b$code, study$hashes, if (name != "DM") list(treatment_variable(dm),
+    variables_of_type(dm, c("key", "rule", "sampled", "identifier")), earlier[vapply(study$datasets[earlier], `[[`, TRUE, "include")]))
   context <- content_key(context)
   list(discover = content_key(context, "discover"), context = context,
     build = content_key(context, if (name %in% b$manual) resolve_rules(ds, b$share) else
@@ -294,7 +297,7 @@ generation_bundle <- function(b) {
     ds$include <- ds$name %in% names
     ds
   })
-  list(datasets = datasets, fits = study$fits[names], supp = study_supp(study), design = study_design(study))
+  list(datasets = datasets, fits = study$fits[names], spine = study$spine, supp = study_supp(study), design = study_design(study))
 }
 
 idle <- function(b) !length(b$queue) && !any(vapply(b$running, `[[`, "", "kind") %in% c("load", "build"))
@@ -394,7 +397,7 @@ build_status <- function(b) {
 # some records (generation follows the rule), rejected rules, and variables not generated.
 build_decisions <- function(b) {
   rows <- lapply(b$study$datasets, function(ds) {
-    rules <- Filter(function(r) !identical(r$origin, "standard") && r$status %in% c("accepted", "rejected"), ds$rules)
+    rules <- Filter(function(r) r$status %in% c("accepted", "rejected"), ds$rules)
     rule_rows <- lapply(rules, function(r) data.frame(dataset = ds$name, variable = r$target,
       decision = if (r$status == "accepted") "Calculated" else "Rule rejected", detail = rule_label(r),
       share = r$share, records = if (r$status == "accepted") round(r$checked * (1 - r$share)) else r$checked,

@@ -1,20 +1,22 @@
-# Maximum-likelihood models for sampled nodes and record structures.
+# Models for sampled nodes. Records and dates are never modelled: they are the spine (see
+# spine.R).
 #
-# A fitted node is a set of parts, one per test (findings), stage (the first record of a
-# series, or a later one given the previous value) and, for dates, whether the anchor date
-# is known. Each part models one value:
+# A fitted node is a set of parts, one per test (findings) and stage (the first record of a
+# series, or a later one given the previous value). Each part models one value:
 #   categories          multinomial over the observed values, missing being a value
 #   normal / lognormal  whether a value is recorded, then a linear model of the value
-#   normrank            the same on normal scores of the value's ranks, drawn back through its
-#                       quantiles at 5% steps (dates, whose gaps are rarely normal)
-# Dates are day gaps from their anchor date, or day numbers without one. Fits keep
-# coefficients and summaries only, never source rows.
+#   tree                a classification or regression tree (CART, as in synthpop): a value
+#                       is drawn from the counts of its leaf, or a number from its quantiles
+# Fits keep coefficients and summaries only, never source rows; implications keep the
+# values they tie together.
 
 MIN_LEVEL_COUNT <- 5
 MAX_MODEL_LEVELS <- 30
 MAX_DISCRETE_VALUES <- 10
-RANK_STEPS <- seq(0, 1, 0.05)
-NODE_MODELS <- c(auto = "Automatic", normal = "Normal", lognormal = "Log-normal", categories = "Categories")
+NODE_MODELS <- c(auto = "Linear (automatic)", normal = "Normal", lognormal = "Log-normal", categories = "Categories", tree = "Tree (CART)")
+# The model of a new node: "auto" for the linear models (the default), or "tree" (option
+# synth.model, or SYNTH_MODEL in the environment, which the workers share).
+default_node_model <- function() getOption("synth.model", Sys.getenv("SYNTH_MODEL", "auto"))
 
 # ---- Design matrices ------------------------------------------------------------------
 
@@ -79,13 +81,49 @@ fit_multinomial <- function(X, codes, k) {
   list(coef = coef, se = se)
 }
 
+# The design column of each predictor ("" for the intercept).
+design_groups <- function(info) c("", rep(names(info), vapply(info, function(i) if (i$type == "numeric") 1L else length(i$levels) - 1L, 0L)))
+
+# AIC of a model part with the columns of X (identical rows fitted once, weighted).
+part_aic <- function(y, X, type) {
+  if (type == "categories") {
+    values <- level_string(y)
+    key <- do.call(paste, c(as.data.frame(X), list(values), sep = "\r"))
+    rows <- which(!duplicated(key))
+    data <- data.frame(.y = factor(values[rows]), X[rows, -1, drop = FALSE])
+    names(data)[-1] <- paste0("x", seq_len(ncol(X) - 1))
+    formula <- if (ncol(X) > 1) .y ~ . else .y ~ 1
+    return(nnet::multinom(formula, data = data, weights = tabulate(match(key, key[rows])), trace = FALSE, MaxNWts = 1e6, maxit = 200)$AIC)
+  }
+  observed <- !is.na(y)
+  z <- if (type == "lognormal") log(y[observed]) else y[observed]
+  fit <- stats::lm.fit(X[observed, , drop = FALSE], z)
+  length(z) * log(max(sum(fit$residuals^2), 1e-12) / length(z)) + 2 * fit$rank
+}
+
 # One model part. Predictors are used only with at least 10 values per coefficient; for
 # categories, 10 values outside the most common one (a rare value is not learnt per level).
-fit_part <- function(y, X, type) {
+# When not all of them fit, whole predictors are added one at a time, the one that lowers
+# the AIC most first, while they fit and lower it (36 retrieval terms keep the visit).
+fit_part <- function(y, X, type, groups = colnames(X)) {
   observed <- !is.na(y)
   if (!any(observed)) type <- "categories"
-  n <- if (type == "categories") length(y) - max(table(level_string(y))) else sum(observed)
+  values <- table(level_string(y))
+  n <- if (type == "categories") length(y) - max(values) else sum(observed)
   columns <- if (n >= 10 * ncol(X)) seq_len(ncol(X)) else 1L
+  if (length(columns) == 1 && n >= 20 && (type != "categories" || length(values) <= MAX_MODEL_LEVELS)) {
+    candidates <- unique(groups[-1])
+    best <- part_aic(y, X[, 1, drop = FALSE], type)
+    repeat {
+      candidates <- Filter(function(g) length(columns) + sum(groups == g) <= n / 10, candidates)
+      if (!length(candidates)) break
+      aic <- vapply(candidates, function(g) part_aic(y, X[, c(columns, which(groups == g)), drop = FALSE], type), 0)
+      if (min(aic) >= best) break
+      best <- min(aic)
+      columns <- sort(c(columns, which(groups == candidates[which.min(aic)])))
+      candidates <- candidates[-which.min(aic)]
+    }
+  }
   X <- X[, columns, drop = FALSE]
   if (type == "categories") {
     values <- level_string(y)
@@ -93,8 +131,7 @@ fit_part <- function(y, X, type) {
     return(c(fit_multinomial(X, match(values, levels), length(levels)),
       list(type = type, columns = columns, levels = levels, numeric = is.numeric(y))))
   }
-  knots <- if (type == "normrank") unname(stats::quantile(y[observed], RANK_STEPS))
-  z <- switch(type, lognormal = log(y[observed]), normrank = stats::qnorm((rank(y[observed]) - 0.5) / sum(observed)), y[observed])
+  z <- if (type == "lognormal") log(y[observed]) else y[observed]
   X_obs <- X[observed, , drop = FALSE]
   fit <- stats::lm.fit(X_obs, z)
   sigma <- sqrt(sum(fit$residuals^2) / max(1, length(z) - fit$rank))
@@ -103,29 +140,37 @@ fit_part <- function(y, X, type) {
     coef = matrix(ifelse(is.na(fit$coefficients), 0, fit$coefficients), 1, dimnames = list(NULL, colnames(X))),
     se = matrix(sigma * sqrt(pmax(variance, 0)), 1, dimnames = list(NULL, colnames(X))),
     recorded = if (!all(observed)) fit_multinomial(X, 2L - observed, 2L),
-    digits = decimals(y[observed]), range = range(y[observed]), knots = knots)
+    digits = decimals(y[observed]), range = range(y[observed]), grid = value_grid(y[observed]))
+}
+
+# Values on a grid coarser than their decimals (whole mg/dL converted to mmol/L: glucose
+# 0.05551 apart) as origin and step, so drawn values stay conversions of whole numbers.
+value_grid <- function(v) {
+  u <- sort(unique(v))
+  tolerance <- 10^-decimals(v)
+  if (length(u) < 10 || min(diff(u)) <= 1.5 * tolerance) return(NULL)
+  k <- round((u - u[1]) / min(diff(u)))
+  fit <- stats::lm.fit(cbind(1, k), u)
+  if (max(abs(fit$residuals)) > tolerance) return(NULL)
+  unname(fit$coefficients)
 }
 
 model_scale <- function(type, x) if (identical(type, "lognormal")) log(pmax(x, 1e-8)) else x
 
-# The model part of each record: its test, whether it follows an earlier value of its
-# series, and for dates whether the anchor date (the first predictor) is known. A date's
-# model value is its gap from the anchor, or its day number without one (offset 0).
+# The model part of each record: its test, and whether it follows an earlier value of its
+# series.
 node_parts <- function(ds, variable, frame, previous) {
   s <- ds$structure
-  anchor <- ds$nodes[[variable]]$predictors[1]
-  anchor <- if (ds$kinds[[variable]] == "date" && !is.na(anchor) && inherits(frame[[anchor]], "Date")) anchor
-  offset <- if (is.null(anchor)) rep(NA_real_, nrow(frame)) else as.numeric(frame[[anchor]])
   test <- if (!is.null(s$test) && ds$levels[[variable]] == "record") format_value(frame[[s$test]]) else rep("", nrow(frame))
-  list(anchor = anchor, offset = ifelse(is.na(offset), 0, offset),
-    key = paste(test, ifelse(is.na(previous), "first", "follow"), ifelse(is.na(offset), "", "anchored"), sep = "|"))
+  list(key = paste(test, ifelse(is.na(previous), "first", "follow"), sep = "|"), scale = test)
 }
 
 # A node is fitted on one row per subject, per subject and visit, or per record. The model
-# type is chosen once per test (and anchor state), so first and later records share a
-# scale: categories for text and numbers with few values, otherwise normal, or log-normal
-# when positive and skewed. A trajectory's first record is fitted without the arm (it is
-# measured before treatment); later records add the previous recorded value.
+# type is chosen once per test, so first and later records share a scale: categories for
+# text and numbers with few values, otherwise normal, or log-normal when positive and
+# skewed. A trajectory's first record is fitted without the arm (it is measured before
+# treatment); later records add the previous recorded value. A category also keeps its
+# implications (see spine.R).
 fit_node <- function(ds, variable, frame, arm) {
   node <- ds$nodes[[variable]]
   s <- ds$structure
@@ -140,48 +185,42 @@ fit_node <- function(ds, variable, frame, arm) {
     follows <- last > 0 & series[o][pmax(last, 1)] == series[o]
     previous[o[follows]] <- y[o][last[follows]]
   }
-  dates <- if (ds$kinds[[variable]] == "date") setdiff(names(Filter(function(v) inherits(v, "Date"), frame)), variable)
-  ordered_dates <- function(sign) dates[vapply(frame[dates], function(d) isTRUE(mean(sign * as.numeric(y - d) >= 0, na.rm = TRUE) >= 0.99), TRUE)]
-  after <- ordered_dates(1)
-  before <- ordered_dates(-1)
-  # A date that follows visit order within the subject in 99% of source steps.
-  monotone <- !is.null(dates) && !is.null(s$visit) && level != "subject" && {
-    o <- order(group_index(frame, visit_series(s, level)), as.numeric(frame[[s$visit]]))
-    same <- group_index(frame, visit_series(s, level))[o]
-    step <- diff(as.numeric(y[o]))[same[-1] == same[-length(same)]]
-    isTRUE(mean(step >= 0, na.rm = TRUE) >= 0.99)
-  }
   parts <- node_parts(ds, variable, frame, previous)
-  if (ds$kinds[[variable]] == "date") y <- as.numeric(y) - parts$offset
   arm <- c(arm, paste0("DM.", arm))
-  predictors <- setdiff(intersect(node$predictors, names(frame)), parts$anchor)
-  scale <- sub("\\|(first|follow)\\|", "|", parts$key)
-  types <- vapply(split(y, scale), function(v) {
+  predictors <- intersect(node$predictors, names(frame))
+  tree <- node$model == "tree"
+  model <- if (tree) "auto" else node$model
+  types <- vapply(split(y, parts$scale), function(v) {
     v <- v[!is.na(v)]
-    if (!is.numeric(v) || node$model == "categories" || (node$model == "auto" && length(unique(v)) <= MAX_DISCRETE_VALUES))
+    if (!is.numeric(v) || model == "categories" || (model == "auto" && length(unique(v)) <= MAX_DISCRETE_VALUES))
       return("categories")
     skew <- if (length(v) > 2 && stats::sd(v) > 0) mean((v - mean(v))^3) / stats::sd(v)^3 else 0
-    if (node$model == "auto" && ds$kinds[[variable]] == "date") return("normrank")
-    if (all(v > 0) && (node$model == "lognormal" || (node$model == "auto" && skew > 1))) "lognormal" else "normal"
+    if (all(v > 0) && (model == "lognormal" || (model == "auto" && skew > 1))) "lognormal" else "normal"
   }, "")
   fits <- lapply(split(seq_along(y), parts$key), function(i) {
-    follow <- grepl("|follow|", parts$key[i[1]], fixed = TRUE)
-    type <- types[[scale[i[1]]]]
+    follow <- grepl("|follow", parts$key[i[1]], fixed = TRUE)
+    type <- unname(types[match(parts$scale[i[1]], names(types))])
     records <- frame[i, , drop = FALSE]
-    records$.previous <- model_scale(type, previous[i])
+    records$.previous <- model_scale(if (tree) "tree" else type, previous[i])
     used <- if (follow) c(predictors, ".previous") else if (isTRUE(node$prev)) setdiff(predictors, arm) else predictors
-    info <- design_info(records, used, c(s$visit, s$test))
-    c(fit_part(y[i], design_matrix(info, records), type), list(info = info))
+    if (tree) return(fit_tree(y[i], records, used, type == "categories"))
+    info <- design_info(records, used, c("VISITNUM", s$test))
+    c(fit_part(y[i], design_matrix(info, records), type, design_groups(info)), list(info = info))
   })
-  description <- sprintf("%s%s%s%s, %d %s", paste(sort(unique(types)), collapse = "/"),
-    if (length(unique(parts$key)) > 1 && !is.null(s$test) && level == "record") paste(" per", s$test) else "",
-    if (!is.null(parts$anchor)) paste(" of days from", display_name(parts$anchor)) else "",
-    if (isTRUE(node$prev)) " with previous value" else "", nrow(frame), if (level == "record") "records" else paste(level, "rows"))
-  list(parts = fits, arm = arm, description = paste0(description, if (monotone) ", in visit order"), after = after,
-    before = before, monotone = monotone)
+  implications <- if (all(types == "categories")) {
+    keys <- implication_keys(ds, frame)
+    if (ds$name != "DM" && level == "subject") keys <- keys[!record_feature(keys)]
+    rbind(fit_implications(y, frame, keys), derived_implications(ds, variable, y, frame, keys))
+  }
+  reduced <- sum(vapply(fits, function(p) p$type != "tree" && length(p$columns) < length(design_groups(p$info)), TRUE))
+  description <- sprintf("%s%s%s, %d %s%s%s", if (tree) sprintf("trees (%s leaves)", paste(range(vapply(fits, `[[`, 0L, "leaves")), collapse = "-"))
+    else paste(sort(unique(types)), collapse = "/"),
+    if (length(unique(parts$scale)) > 1) paste(" per", s$test) else "",
+    if (isTRUE(node$prev)) " with previous value" else "", nrow(frame), if (level == "record") "records" else paste(level, "rows"),
+    if (reduced) sprintf(", fewer predictors in %d of %d parts (few values)", reduced, length(fits)) else "",
+    if (NROW(implications)) sprintf(", %d implication%s", nrow(implications), if (nrow(implications) > 1) "s" else "") else "")
+  list(parts = fits, arm = arm, description = description, implications = implications)
 }
-
-visit_series <- function(s, level) c("USUBJID", if (level == "record") setdiff(s$keys, s$visit))
 
 # A node's rows: one per subject, per subject and visit, per series, or every record.
 level_rows <- function(frame, level, s) {
@@ -190,6 +229,115 @@ level_rows <- function(frame, level, s) {
 }
 
 level_key <- function(level, s) switch(level, subject = "USUBJID", visit = c("USUBJID", s$visit), series = c("USUBJID", ".series"), record = NULL)
+
+# ---- Trees ----------------------------------------------------------------------------
+
+# synthpop's CART defaults: leaves of at least 5 records, grown until no split helps.
+TREE_MIN_LEAF <- 5
+TREE_QUANTILES <- seq(0, 1, 0.05)
+
+# Predictors as rpart reads them: numbers (dates as days, missing below every value, so a
+# split can set it apart) or factors over the fitted levels (an unseen level is the most
+# common one). Every record then reaches a leaf.
+TREE_MISSING <- -1e15
+tree_data <- function(records, predictors, levels = NULL, common = NULL) {
+  out <- lapply(setNames(predictors, predictors), function(p) {
+    v <- records[[p]]
+    if (inherits(v, "Date")) v <- as.numeric(v)
+    if (is.numeric(v) && is.null(levels[[p]])) return(ifelse(is.na(v), TREE_MISSING, v))
+    v <- level_string(v)
+    if (!is.null(levels[[p]])) v[!v %in% levels[[p]]] <- common[[p]]
+    factor(v, levels[[p]] %||% sort(unique(v)))
+  })
+  as.data.frame(out, col.names = paste0("x", seq_along(predictors)))
+}
+
+# A category is fitted as one class (missing being a class); a number as whether it is
+# recorded and, when recorded, its value. The tree keeps its splits and, per leaf, the class
+# counts or 21 quantiles of the value; leaves are found again by numbering the tree's nodes.
+fit_tree <- function(y, records, predictors, categorical) {
+  x <- tree_data(records, predictors)
+  levels <- setNames(lapply(x, levels), predictors)
+  common <- lapply(x, function(v) if (is.factor(v)) names(which.max(table(v))))
+  control <- rpart::rpart.control(minbucket = TREE_MIN_LEAF, minsplit = 2 * TREE_MIN_LEAF, cp = 1e-8, xval = 0,
+    maxcompete = 0, maxsurrogate = 0)
+  grow <- function(target, rows, method) {
+    data <- cbind(.y = target, x[rows, , drop = FALSE])
+    tree <- if (length(predictors) && length(unique(target)) > 1) rpart::rpart(.y ~ ., data, method = method, control = control, model = FALSE, x = FALSE, y = FALSE)
+    leaf <- if (is.null(tree)) rep(1L, length(rows)) else tree$where
+    if (!is.null(tree)) {
+      tree$frame$yval <- seq_len(nrow(tree$frame))
+      tree$where <- NULL
+      tree$call <- NULL
+    }
+    list(tree = tree, leaf = leaf)
+  }
+  out <- list(type = "tree", predictors = predictors, levels = levels, common = setNames(common, predictors), categorical = categorical, numeric = is.numeric(y))
+  if (categorical) {
+    values <- level_string(y)
+    g <- grow(factor(values), seq_along(y), "class")
+    out$classes <- sort(unique(values))
+    out$counts <- table(factor(g$leaf, unique(g$leaf)), factor(values, out$classes))
+    out$leaves <- nrow(out$counts)
+    out$tree <- g$tree
+    return(out)
+  }
+  observed <- !is.na(y)
+  if (!all(observed)) {
+    g <- grow(factor(observed), seq_along(y), "class")
+    out$recorded <- list(tree = g$tree, counts = table(factor(g$leaf, unique(g$leaf)), factor(observed, c(FALSE, TRUE))))
+  }
+  g <- grow(y[observed], which(observed), "anova")
+  out$tree <- g$tree
+  out$quantiles <- do.call(rbind, tapply(y[observed], factor(g$leaf, unique(g$leaf)), stats::quantile, TREE_QUANTILES, names = FALSE))
+  out$leaves <- nrow(out$quantiles)
+  out$digits <- decimals(y[observed])
+  out$grid <- value_grid(y[observed])
+  out
+}
+
+# The leaf (row name of the counts or quantiles) of each record. A record that stops at an
+# inner node (a level no record at that node had) gets one of the leaves below it, in
+# proportion to their records, which draws from the node's pooled distribution.
+tree_leaf <- function(tree, x) {
+  if (is.null(tree)) return(rep("1", nrow(x)))
+  row <- stats::predict(tree, x, type = "vector")
+  frame <- tree$frame
+  id <- as.integer(rownames(frame))
+  leaves <- which(frame$var == "<leaf>")
+  for (r in unique(row[!row %in% leaves])) {
+    below <- leaves[vapply(id[leaves], function(l) {
+      while (l > id[r]) l <- l %/% 2
+      l == id[r]
+    }, TRUE)]
+    i <- which(row == r)
+    row[i] <- below[sample.int(length(below), length(i), TRUE, frame$n[below])]
+  }
+  as.character(row)
+}
+
+draw_from_counts <- function(counts, leaf) {
+  p <- counts[leaf, , drop = FALSE]
+  colnames(counts)[pmin(1L + rowSums(p %*% upper.tri(diag(ncol(p)), diag = TRUE) < stats::runif(nrow(p)) * rowSums(p)), ncol(p))]
+}
+
+draw_tree <- function(p, records) {
+  x <- tree_data(records, p$predictors, p$levels, p$common)
+  if (p$categorical) {
+    drawn <- draw_from_counts(p$counts, tree_leaf(p$tree, x))
+    drawn[drawn == MISSING] <- NA
+    return(if (p$numeric) as.numeric(drawn) else drawn)
+  }
+  q <- p$quantiles[tree_leaf(p$tree, x), , drop = FALSE]
+  # Inverse of the leaf's distribution function, linear between its quantiles.
+  u <- stats::runif(nrow(q)) * (length(TREE_QUANTILES) - 1)
+  k <- pmin(floor(u), length(TREE_QUANTILES) - 2)
+  drawn <- q[cbind(seq_len(nrow(q)), k + 1)] + (u - k) * (q[cbind(seq_len(nrow(q)), k + 2)] - q[cbind(seq_len(nrow(q)), k + 1)])
+  if (!is.null(p$grid)) drawn <- p$grid[1] + round((drawn - p$grid[1]) / p$grid[2]) * p$grid[2]
+  drawn <- round(drawn, p$digits)
+  if (!is.null(p$recorded)) drawn[draw_from_counts(p$recorded$counts, tree_leaf(p$recorded$tree, x)) == "FALSE"] <- NA
+  drawn
+}
 
 # ---- Drawing --------------------------------------------------------------------------
 
@@ -209,6 +357,10 @@ draw_records <- function(ds, variable, fit, frame, previous) {
     i <- which(parts$key == key)
     records <- frame[i, , drop = FALSE]
     records$.previous <- model_scale(p$type, previous[i])
+    if (p$type == "tree") {
+      values[i] <- draw_tree(p, records)
+      next
+    }
     X <- design_matrix(p$info, records)[, p$columns, drop = FALSE]
     eta <- X %*% t(p$coef)
     if (p$type == "categories") {
@@ -218,22 +370,19 @@ draw_records <- function(ds, variable, fit, frame, previous) {
     } else {
       drawn <- stats::rnorm(length(i), drop(eta), p$sigma)
       if (p$type == "lognormal") drawn <- exp(drawn)
-      if (p$type == "normrank") drawn <- stats::approx(RANK_STEPS, p$knots, stats::pnorm(drawn))$y
-      drawn <- round(pmin(pmax(drawn, p$range[1]), p$range[2]), p$digits)
+      drawn <- pmin(pmax(drawn, p$range[1]), p$range[2])
+      if (!is.null(p$grid)) drawn <- p$grid[1] + round((drawn - p$grid[1]) / p$grid[2]) * p$grid[2]
+      drawn <- round(drawn, p$digits)
       if (!is.null(p$recorded)) drawn[softmax_draw(X %*% t(p$recorded$coef)) == 2] <- NA
     }
-    values[i] <- if (is.numeric(drawn)) drawn + parts$offset[i] else drawn
+    values[i] <- drawn
   }
   values
 }
 
-# Draws a node at its level, visit by visit when it depends on the previous value, and
-# copies each value to every record of that level. A varying arm effect draws the arm
-# coefficients once from N(estimate, SE). Dates outside the observation window, or out of
-# the order they keep with already drawn dates in 99% of source records, are redrawn a
-# few times and then moved to the nearest allowed date; except that a record planned at a
-# visit (not drawn by reach) whose main date is still too late is marked "beyond" (it did
-# not take place).
+# Draws a node at its level, visit by visit when it depends on the previous value, keeps its
+# implications, and copies each value to every record of that level. A varying arm effect
+# draws the arm coefficients once from N(estimate, SE).
 draw_node <- function(ds, variable, fit, frame) {
   node <- ds$nodes[[variable]]
   s <- ds$structure
@@ -241,6 +390,7 @@ draw_node <- function(ds, variable, fit, frame) {
   rows <- level_rows(frame, level, s)
   part <- frame[rows, , drop = FALSE]
   if (isTRUE(node$vary)) fit$parts <- lapply(fit$parts, function(p) {
+    if (p$type == "tree") return(p)
     arm <- sub("=.*$", "", colnames(p$coef)) %in% fit$arm
     p$coef[, arm] <- stats::rnorm(length(p$coef[, arm]), p$coef[, arm], p$se[, arm])
     p
@@ -255,370 +405,22 @@ draw_node <- function(ds, variable, fit, frame) {
     values[i] <- draw_records(ds, variable, fit, part[i, , drop = FALSE], if (isTRUE(node$prev)) last[series[i]] else rep(NA, length(i)))
     if (isTRUE(node$prev)) last[series[i][!is.na(values[i])]] <- values[i][!is.na(values[i])]
   }
-  if (ds$kinds[[variable]] == "date") {
-    bound <- function(names, pick, none) do.call(pick, c(lapply(names, function(n) as.numeric(part[[n]] %||% NA)), none, na.rm = TRUE))
-    start <- bound(c(ds$window$start, fit$after), pmax, -Inf)
-    end <- bound(c(ds$window$end, fit$before), pmin, Inf)
-    for (attempt in 1:10) {
-      bad <- which(!is.na(values) & (values < start | values > end))
-      if (!length(bad)) break
-      values[bad] <- draw_records(ds, variable, fit, part[bad, , drop = FALSE], rep(NA, length(bad)))
-    }
-    # Visits drawn by reach are within the window already: their dates are moved into it.
-    planned <- s$type == "schedule" && !is.null(s$visit) && is.null(s$reach) && level != "subject" &&
-      identical(variable, main_date(ds$prefix, ds$variables))
-    late <- planned & !is.na(values) & values > end
-    values[late] <- NA
-    values <- pmin(pmax(values, start), end)
-    # Dates are put in visit order within the subject; bounds that differ by record apply again.
-    if (isTRUE(fit$monotone)) {
-      series <- group_index(part, visit_series(s, level))
-      o <- order(series, as.numeric(part[[s$visit]]))
-      values[o] <- stats::ave(values[o], series[o], FUN = function(v) replace(v, !is.na(v), sort(v[!is.na(v)])))
-      values <- pmin(pmax(values, start), end)
-    }
-    values <- structure(as.Date(values, origin = "1970-01-01"), beyond = late)
-  }
+  values <- apply_implications(fit$implications, values, part,
+    function(i) draw_records(ds, variable, fit, part[i, , drop = FALSE], rep(NA, length(i))))
   if (level == "record") return(values)
   key <- level_key(level, s)
-  row <- match(key_strings(frame[key]), key_strings(part[key]))
-  structure(values[row], beyond = attr(values, "beyond")[row])
+  values[match(key_strings(frame[key]), key_strings(part[key]))]
 }
-
-# ---- Record structures -----------------------------------------------------------------
-
-# How many records each subject has, and with which record keys. `subjects` holds one row
-# per subject with the DM inputs; `arm` is the arm's input column.
-RECORD_STRUCTURES <- list(
-  # By arm: the share of subjects with records at all and, among them, the share attending
-  # each visit; given attendance, the distribution of record counts for each combination
-  # of the other keys (zero included). Attendance is given that a subject has records, so
-  # that a visit every subject with records attends is attended by every generated one.
-  schedule = list(
-    fit = function(x, subjects, arm, s, visits = NULL) {
-      group <- if (isTRUE(s$by_arm) && arm %in% names(subjects)) level_string(subjects[[arm]]) else rep("all", nrow(subjects))
-      x <- x[x$USUBJID %in% subjects$USUBJID, , drop = FALSE]
-      others <- setdiff(s$keys, s$visit)
-      combo <- group_index(x, others)
-      visit <- if (is.null(s$visit)) rep(".", nrow(x)) else format_value(x[[s$visit]])
-      attended <- unique(data.frame(USUBJID = x$USUBJID, visit = visit, stringsAsFactors = FALSE))
-      attended$arm <- group[match(attended$USUBJID, subjects$USUBJID)]
-      slots <- merge(attended, data.frame(combo = seq_len(max(combo, 1))))
-      slots$records <- tabulate(match(paste(x$USUBJID, visit, combo), paste(slots$USUBJID, slots$visit, slots$combo)), nrow(slots))
-      if (isTRUE(s$unique)) slots$records <- pmin(slots$records, 1)
-      counts <- stats::aggregate(list(n = slots$records), slots[c("arm", "visit", "combo", "records")], length)
-      counts$p <- counts$n / stats::ave(counts$n, counts$arm, counts$visit, counts$combo, FUN = sum)
-      attendance <- as.data.frame(table(arm = attended$arm, visit = attended$visit), stringsAsFactors = FALSE)
-      members <- tapply(subjects$USUBJID %in% x$USUBJID, group, sum)
-      attendance$p <- attendance$Freq / pmax(members[attendance$arm], 1)
-      # With SV, attendance is given that the subject attended the visit at all.
-      if (!is.null(visits)) {
-        at_visit <- visits[visits$USUBJID %in% x$USUBJID, ]
-        at_visit <- table(paste(group[match(at_visit$USUBJID, subjects$USUBJID)], at_visit$visit, sep = "\r"))
-        attendance$p <- attendance$Freq / pmax(at_visit[paste(attendance$arm, attendance$visit, sep = "\r")], attendance$Freq, 1, na.rm = TRUE)
-      }
-      # And given the visit's position (see `visit_position()`), shrunk towards the visit's attendance by five subjects' worth of it.
-      cells <- NULL
-      if (!is.null(visits) && is.null(s$reach)) {
-        at_visit <- visit_position(visits[visits$USUBJID %in% x$USUBJID, ], subjects)
-        at_visit$arm <- group[match(at_visit$USUBJID, subjects$USUBJID)]
-        at_visit$came <- paste(at_visit$USUBJID, at_visit$visit) %in% paste(attended$USUBJID, attended$visit)
-        key <- paste(at_visit$arm, at_visit$visit, at_visit$position, sep = "\r")
-        prior <- attendance$p[match(paste(at_visit$arm, at_visit$visit), paste(attendance$arm, attendance$visit))]
-        cells <- (tapply(at_visit$came, key, sum) + 5 * tapply(prior, key, mean)) / (table(key) + 5)
-        cells <- setNames(as.vector(cells), names(cells))
-      }
-      # With a reach, attendance is given that the subject's window lasts until the visit's
-      # early day: the earliest day after entry any of its attenders comes. The window
-      # ends at the end of participation or, for a visit whose known attenders (90% of them)
-      # all come by an earlier DM date, at the earliest such date (a visit of the reference
-      # period ends with it). Leaving the study, by the window, ends the visits.
-      reach <- NULL
-      if (!is.null(s$reach)) {
-        at <- match(x$USUBJID, subjects$USUBJID)
-        date <- as.numeric(x[[s$reach[["date"]]]])
-        day <- date - as.numeric(subjects[[s$reach[["start"]]]])[at]
-        early <- tapply(day, visit, function(d) if (all(is.na(d))) NA else min(d, na.rm = TRUE))
-        ends <- grep("^DM\\.", names(Filter(function(v) inherits(v, "Date"), subjects)), value = TRUE)
-        bound <- vapply(names(early), function(v) {
-          rows <- visit == v
-          gap <- vapply(ends, function(e) {
-            g <- as.numeric(subjects[[e]])[at[rows]] - date[rows]
-            if (mean(!is.na(g)) >= SHARE_TO_PROPOSE && mean(g >= 0, na.rm = TRUE) >= 0.99) stats::median(g, na.rm = TRUE) else NA
-          }, 0)
-          if (all(is.na(gap))) s$reach[["end"]] else ends[which.min(gap)]
-        }, "")
-        # A DM date closes the visits it ends when it is the date of the subject's last of them.
-        closes <- vapply(unique(bound), function(e) {
-          rows <- bound[visit] %in% e & !is.na(date)
-          last <- tapply(date[rows], x$USUBJID[rows], max)
-          mean(last == as.numeric(subjects[[e]])[match(names(last), subjects$USUBJID)], na.rm = TRUE)
-        }, 0) >= SHARE_TO_PROPOSE
-        reach <- list(day = early, bound = bound, closes = unique(bound)[closes %in% TRUE])
-        reached <- function(id, v) visit_reached(reach, subjects, s, id, v)
-        member <- subjects$USUBJID[subjects$USUBJID %in% x$USUBJID]
-        cell <- paste(attendance$arm, attendance$visit, sep = "\r")
-        came <- attended[reached(attended$USUBJID, attended$visit), , drop = FALSE]
-        open <- vapply(seq_len(nrow(attendance)), function(i)
-          sum(group[match(member, subjects$USUBJID)] == attendance$arm[i] & reached(member, attendance$visit[i])), 0)
-        attendance$p <- as.vector(table(factor(paste(came$arm, came$visit, sep = "\r"), levels = cell))) / pmax(open, 1)
-        # The visits that end some subject's visits, in the order of their usual day.
-        last <- order(x$USUBJID, day, decreasing = TRUE)
-        reach$ends <- unique(visit[last][!duplicated(x$USUBJID[last])])
-        reach$usual <- tapply(day, visit, stats::median, na.rm = TRUE)
-      }
-      list(members = members / as.vector(table(group)[names(members)]), attendance = attendance[c("arm", "visit", "p")], reach = reach, cells = cells,
-        counts = counts[c("arm", "visit", "combo", "records", "p")], combos = x[!duplicated(combo), others, drop = FALSE],
-        visits = if (!is.null(s$visit)) sort(unique(x[[s$visit]])),
-        description = sprintf("%d key combinations over %d visits", max(combo, 1), length(unique(visit))))
-    },
-    draw = function(fit, subjects, arm, s, visits = NULL) {
-      group <- if (isTRUE(s$by_arm) && arm %in% names(subjects)) level_string(subjects[[arm]]) else rep("all", nrow(subjects))
-      member <- fit$members[group]
-      if (any(member > 0 & member < 1, na.rm = TRUE)) {
-        keep <- which(stats::runif(length(group)) < member)
-        subjects <- subjects[keep, , drop = FALSE]
-        group <- group[keep]
-      }
-      slots <- merge(data.frame(USUBJID = subjects$USUBJID, arm = group, stringsAsFactors = FALSE), fit$attendance, by = "arm")
-      if (!is.null(fit$reach)) {
-        slots <- slots[visit_reached(fit$reach, subjects, s, slots$USUBJID, slots$visit), , drop = FALSE]
-      }
-      if (!is.null(visits)) slots <- slots[paste(slots$USUBJID, slots$visit) %in% paste(visits$USUBJID, visits$visit), , drop = FALSE]
-      if (!is.null(fit$cells) && nrow(slots)) {
-        position <- visit_position(visits, subjects)
-        position <- position$position[match(paste(slots$USUBJID, slots$visit), paste(position$USUBJID, position$visit))]
-        p <- fit$cells[paste(slots$arm, slots$visit, position, sep = "\r")]
-        slots$p <- ifelse(is.na(p), slots$p, p)
-      }
-      # A member of the dataset has at least one visit: without any, their likeliest.
-      came <- stats::runif(nrow(slots)) < slots$p
-      none <- !slots$USUBJID %in% slots$USUBJID[came]
-      first <- which(none)[order(slots$USUBJID[none], -slots$p[none])]
-      came[first[!duplicated(slots$USUBJID[first])]] <- TRUE
-      # A subject's visits end at a visit that ends some subject's visits in the source.
-      if (!is.null(fit$reach$ends)) {
-        o <- order(slots$USUBJID, -fit$reach$usual[slots$visit])
-        ending <- came[o] & slots$visit[o] %in% fit$reach$ends
-        reached <- stats::ave(as.numeric(ending), slots$USUBJID[o], FUN = cumsum) > 0
-        came[o] <- came[o] & (reached | !stats::ave(ending, slots$USUBJID[o], FUN = any))
-      }
-      slots <- slots[came, c("USUBJID", "arm", "visit")]
-      options <- merge(slots, fit$counts, by = c("arm", "visit"))
-      options <- options[order(options$USUBJID, options$visit, options$combo, options$records), ]
-      cell <- group_index(options, c("USUBJID", "visit", "combo"))
-      hit <- which(stats::runif(max(0, cell))[cell] < stats::ave(options$p, cell, FUN = cumsum))
-      chosen <- options[hit[!duplicated(cell[hit])], ]
-      chosen <- chosen[rep(seq_len(nrow(chosen)), chosen$records), ]
-      records <- data.frame(USUBJID = chosen$USUBJID, stringsAsFactors = FALSE)
-      if (!is.null(s$visit)) records[[s$visit]] <- fit$visits[match(chosen$visit, format_value(fit$visits))]
-      cbind(records, fit$combos[chosen$combo, , drop = FALSE], row.names = NULL)
-    }),
-  # Records per subject: Poisson, or negative binomial when overdispersed.
-  count = list(
-    fit = function(x, subjects, arm, s, visits = NULL) fit_count(tabulate(match(x$USUBJID, subjects$USUBJID), nrow(subjects)), subjects, s),
-    draw = function(fit, subjects, arm, s, visits = NULL)
-      data.frame(USUBJID = rep(subjects$USUBJID, draw_count(fit, subjects)), stringsAsFactors = FALSE)),
-  # Series per subject, counted like records; each series is recorded at consecutive
-  # collection visits of the subject (their SV visits at the dataset's visit numbers). It
-  # starts at a visit at the rate series start there per series of subjects attending it, by
-  # visit and reference period, and after its j-th record stops at the discrete hazard of
-  # stopping then, by j and the next visit's reference period. A series still recorded at the
-  # subject's last collection visit is censored there.
-  series = list(
-    fit = function(x, subjects, arm, s, visits = NULL) {
-      own <- collection_visits(visits, subjects, s)
-      visit <- if (s$keys == "VISITNUM") format_value(x$VISITNUM) else
-        own$visit[match(paste(x$USUBJID, as.numeric(x[[s$keys]])), paste(own$USUBJID, as.numeric(own$date)))]
-      k <- own$k[match(paste(x$USUBJID, visit), paste(own$USUBJID, own$visit))]
-      x <- data.frame(USUBJID = x$USUBJID, series = group_index(x, c("USUBJID", s$series)), k = k, stringsAsFactors = FALSE)[!is.na(k), ]
-      runs <- stats::aggregate(list(start = x$k, end = x$k), list(USUBJID = x$USUBJID, series = x$series), function(v) v)
-      runs$start <- vapply(runs$start, min, 0)
-      runs$end <- vapply(runs$end, max, 0)
-      total <- tapply(own$k, own$USUBJID, max)
-      cell <- function(u, k) own$cell[match(paste(u, k), paste(own$USUBJID, own$k))]
-      period <- function(u, k) own$period[match(paste(u, k), paste(own$USUBJID, own$k))]
-      # Starts per cell over the series of subjects attending it.
-      per <- table(runs$USUBJID)
-      exposure <- tapply(as.numeric(per[own$USUBJID]), own$cell, sum, na.rm = TRUE)
-      starts <- table(cell(runs$USUBJID, runs$start))
-      rate <- as.numeric(starts[names(exposure)]) / exposure
-      rate[is.na(rate)] <- 0
-      # Steps: after record j, the series continues (0) or stops (1) before the next visit.
-      steps <- do.call(rbind, lapply(seq_len(nrow(runs)), function(i) {
-        r <- runs[i, ]
-        j <- seq_len(r$end - r$start + 1)
-        more <- r$start + j <= total[[r$USUBJID]]
-        if (!any(more)) return(NULL)
-        data.frame(j = pmin(j, 10), period = period(r$USUBJID, r$start + j), stop = as.numeric(j == max(j)))[more, ]
-      }))
-      hazard <- tapply(steps$stop, paste(steps$j, steps$period), mean)
-      counts <- as.numeric(per[subjects$USUBJID])
-      count <- fit_count(ifelse(is.na(counts), 0, counts), subjects, s)
-      # Share of subjects with records recorded at their first and at their last collection visit.
-      last <- tapply(runs$end, runs$USUBJID, max)
-      ends <- c(first = mean(tapply(runs$start, runs$USUBJID, min) == 1), last = mean(last == total[names(last)]))
-      list(count = count, rate = rate, hazard = hazard, hazard_j = tapply(steps$stop, steps$j, mean), ends = ends,
-        description = sprintf("series: %s; %.1f records per series; %.0f%% of subjects recorded at their first collection visit, %.0f%% at their last",
-          count$description, nrow(x) / nrow(runs), 100 * ends[["first"]], 100 * ends[["last"]]))
-    },
-    draw = function(fit, subjects, arm, s, visits = NULL) {
-      own <- collection_visits(visits, subjects, s)
-      n <- draw_count(fit$count, subjects)
-      ids <- rep(subjects$USUBJID, n)
-      rows <- split(seq_len(nrow(own)), own$USUBJID)
-      out <- lapply(seq_along(ids), function(i) {
-        r <- rows[[ids[i]]]
-        if (!length(r)) return(NULL)
-        w <- fit$rate[own$cell[r]]
-        w[is.na(w)] <- 0
-        start <- if (sum(w) > 0) r[sample.int(length(r), 1, prob = w)] else r[1]
-        end <- start
-        while (end < max(r)) {
-          j <- as.character(min(end - start + 1, 10))
-          h <- fit$hazard[paste(j, own$period[end + 1])]
-          if (is.na(h)) h <- fit$hazard_j[j]
-          if (is.na(h) || stats::runif(1) < h) break
-          end <- end + 1
-        }
-        data.frame(USUBJID = ids[i], .series = i, row = start:end, stringsAsFactors = FALSE)
-      })
-      out <- do.call(rbind, out)
-      if (is.null(out)) out <- data.frame(USUBJID = character(), .series = integer(), row = integer())
-      # Subjects keep the source's shares recorded at their first and last collection visit:
-      # among those drawn without, enough have their earliest series start there (or their
-      # latest continue to it).
-      for (side in names(fit$ends)) {
-        bound <- vapply(rows[out$USUBJID], if (side == "first") min else max, 0)
-        hit <- tapply(out$row == bound, out$USUBJID, any)
-        p <- (fit$ends[[side]] - mean(hit)) / (1 - mean(hit))
-        if (!is.finite(p) || p <= 0) next
-        move <- names(hit)[!hit][stats::runif(sum(!hit)) < p]
-        for (u in move) {
-          own_rows <- which(out$USUBJID == u)
-          pick <- own_rows[if (side == "first") which.min(out$row[own_rows]) else which.max(out$row[own_rows])]
-          series <- out$.series[pick]
-          span <- if (side == "first") min(rows[[u]]):(out$row[pick] - 1) else (out$row[pick] + 1):max(rows[[u]])
-          out <- rbind(out, data.frame(USUBJID = u, .series = series, row = span, stringsAsFactors = FALSE))
-        }
-      }
-      out <- out[order(out$.series, out$row), , drop = FALSE]
-      records <- data.frame(USUBJID = out$USUBJID, .series = out$.series, stringsAsFactors = FALSE)
-      records[[s$keys]] <- if (s$keys == "VISITNUM") as.numeric(own$visit[out$row]) else own$date[out$row]
-      if (endsWith(s$series, "SPID")) records[[s$series]] <- as.character(stats::ave(out$.series, out$USUBJID, FUN = function(v) match(v, unique(v))))
-      records
-    }))
-
-# Each subject's collection visits for a series dataset, in date order and numbered k = 1, 2,
-# …: SV visits at the dataset's visit numbers. Each is in the SDTMIG reference period of DM
-# (RFSTDTC to RFENDTC) or before or after it; `cell` is the visit with its period.
-collection_visits <- function(visits, subjects, s) {
-  own <- visits[visits$visit %in% format_value(s$schedule) & visits$USUBJID %in% subjects$USUBJID, , drop = FALSE]
-  own <- own[order(own$USUBJID, own$date, as.numeric(own$visit)), , drop = FALSE]
-  own <- own[!duplicated(own[c("USUBJID", "visit")]), , drop = FALSE]
-  own$k <- stats::ave(seq_len(nrow(own)), own$USUBJID, FUN = seq_along)
-  own$period <- reference_period(subjects, own$USUBJID, own$date)
-  own$cell <- paste(own$visit, own$period)
-  rownames(own) <- NULL
-  own
-}
-
-# Each attended visit's SDTMIG reference period, whether it is the subject's last visit in
-# that period (END) and whether it is their last visit (LAST).
-visit_position <- function(visits, subjects) {
-  period <- reference_period(subjects, visits$USUBJID, visits$date)
-  latest <- function(group) stats::ave(as.numeric(visits$date), group, FUN = function(d) if (all(is.na(d))) NA else d == max(d, na.rm = TRUE))
-  visits$position <- paste(period, ifelse(latest(paste(visits$USUBJID, period)) %in% 1, "END", ""), ifelse(latest(visits$USUBJID) %in% 1, "LAST", ""))
-  visits
-}
-
-# A sampled visit's position among the subject's visits, by the record keys and the visit's
-# predictors: a disposition at the end of treatment is at that visit whichever it is.
-fit_position <- function(ds, frame, subjects, visits) {
-  visits <- visit_position(visits, subjects)
-  position <- visits$position[match(visit_keys(frame), paste(visits$USUBJID, visits$visit, sep = "\r"))]
-  records <- frame[!is.na(position), , drop = FALSE]
-  info <- design_info(records, intersect(c(ds$structure$keys, ds$nodes$VISITNUM$predictors), names(records)))
-  c(fit_part(position[!is.na(position)], design_matrix(info, records), "categories"), list(info = info))
-}
-
-# Each record moves to the subject's visit at its drawn position nearest its drawn visit or,
-# without one there, at the nearest position: the same period and END, else the same period.
-placed_visit <- function(x, data, ds, fit, subjects) {
-  if (is.null(fit) || !nrow(x)) return(x$VISITNUM)
-  visits <- visit_position(allowed_visits(data, ds), subjects)
-  X <- design_matrix(fit$info, x)[, fit$columns, drop = FALSE]
-  want <- fit$levels[softmax_draw(X %*% t(fit$coef))]
-  have <- visits$position[match(visit_keys(x), paste(visits$USUBJID, visits$visit, sep = "\r"))]
-  visit <- x$VISITNUM
-  near <- list(function(p) p, function(p) sub(" [A-Z]*$", "", p), function(p) sub(" .*$", "", p))
-  for (i in which(!is.na(visit) & (is.na(have) | have != want))) {
-    own <- visits[visits$USUBJID == x$USUBJID[i], , drop = FALSE]
-    for (f in near) {
-      at <- as.numeric(own$visit[f(own$position) == f(want[i])])
-      if (f(have[i]) %in% f(want[i])) break
-      if (length(at)) {
-        visit[i] <- at[which.min(abs(at - as.numeric(visit[i])))]
-        break
-      }
-    }
-  }
-  visit
-}
-
-# SDTMIG's reference period for --STRF and --ENRF: BEFORE RFSTDTC, DURING up to RFENDTC, or AFTER.
-reference_period <- function(subjects, ids, dates) {
-  at <- match(ids, subjects$USUBJID)
-  start <- as.numeric(subjects[["DM.RFSTDTC"]] %||% rep(NA, nrow(subjects)))[at]
-  end <- as.numeric(subjects[["DM.RFENDTC"]] %||% rep(NA, nrow(subjects)))[at]
-  d <- as.numeric(dates)
-  ifelse(is.na(d) | is.na(start), "UNKNOWN", ifelse(d < start, "BEFORE", ifelse(is.na(end) | d <= end, "DURING", "AFTER")))
-}
-
-fit_count <- function(counts, subjects, s) {
-  info <- design_info(subjects, intersect(s$predictors, names(subjects)))
-  X <- design_matrix(info, subjects)
-  poisson <- suppressWarnings(stats::glm.fit(X, counts, family = stats::poisson()))
-  mu <- poisson$fitted.values
-  dispersion <- sum((counts - mu)^2 / mu) / max(1, length(counts) - poisson$rank)
-  nb <- if (dispersion > 1.5) tryCatch(suppressWarnings(MASS::glm.nb(counts ~ X - 1)), error = function(e) NULL)
-  coef <- unname(if (is.null(nb)) poisson$coefficients else stats::coef(nb))
-  list(info = info, coef = ifelse(is.na(coef), 0, coef), theta = nb$theta, max = max(counts),
-    description = sprintf("%s count, mean %.1f per subject", if (is.null(nb)) "Poisson" else "negative binomial", mean(counts)))
-}
-
-draw_count <- function(fit, subjects) {
-  mu <- exp(drop(design_matrix(fit$info, subjects) %*% fit$coef))
-  n <- if (is.null(fit$theta)) stats::rpois(length(mu), mu) else stats::rnbinom(length(mu), size = fit$theta, mu = mu)
-  pmin(n, fit$max)
-}
-
-# Whether each subject's window, to the end date of the visit, lasts until its early day.
-visit_reached <- function(reach, subjects, s, ids, visits) {
-  at <- match(ids, subjects$USUBJID)
-  visits <- rep_len(visits, length(ids))
-  end <- unname(reach$bound[visits])
-  end[is.na(end)] <- s$reach[["end"]]
-  span <- vapply(seq_along(ids), function(i) as.numeric(subjects[[end[i]]][at[i]]), 0) - as.numeric(subjects[[s$reach[["start"]]]])[at]
-  gap <- span - reach$day[visits]
-  is.na(gap) | gap >= 0
-}
-
 
 # ---- Study fits -----------------------------------------------------------------------
 
 # A node is refitted only when its specification changed since the last fit. The arm is
-# fitted like any categorical node: without predictors that is the allocation ratio.
+# fitted like any categorical node.
 fit_dataset <- function(study, name, previous = NULL) {
   ds <- study$datasets[[name]]
-  data <- study$source$data
   arm <- arm_variable(study$datasets$DM)
   fits <- list(nodes = list(), specs = list())
-  if (name != "DM") fits$structure <- RECORD_STRUCTURES[[ds$structure$type]]$fit(data[[name]],
-    subject_inputs(study, data, name), paste0("DM.", treatment_variable(study$datasets$DM)), ds$structure, subject_visits(data, ds))
   frame <- dataset_frame(study, name)
-  if (isTRUE(ds$structure$sv) && identical(node_type(ds, "VISITNUM"), "sampled"))
-    fits$position <- fit_position(ds, frame, subject_inputs(study, data, name), allowed_visits(data, ds))
   for (v in variables_of_type(ds, "sampled")) {
     spec <- list(node = ds$nodes[[v]], level = ds$levels[[v]], structure = ds$structure)
     fits$nodes[[v]] <- if (identical(previous$specs[[v]], spec)) previous$nodes[[v]] else fit_node(ds, v, frame, arm)

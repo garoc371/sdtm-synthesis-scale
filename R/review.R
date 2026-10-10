@@ -13,7 +13,6 @@ coherence_checks <- function(study, generated) {
     keys <- intersect(c("USUBJID", if (isTRUE(ds$structure$unique)) ds$structure$keys else sequence[1]), names(x))
     starts <- grep("STDTC$", names(x), value = TRUE)
     ends <- sub("STDTC$", "ENDTC", starts)
-    pinned <- pinned_records(ds, x, data$DM)
     subjects <- unique(x$USUBJID)
     fixed <- ds$fixed
     rows <- c(rows,
@@ -25,13 +24,11 @@ coherence_checks <- function(study, generated) {
           n <- tabulate(match(x$USUBJID[format_value(x[[fixed$variable[i]]]) %in% fixed$value[i]], subjects), length(subjects))
           sprintf("%s has %d %s", subjects, n, fixed$value[i])[n != fixed$records[i]]
         })))),
-      lapply(accepted_rules(ds), function(rule) check_row(name, paste0(rule$target, " = ", rule_label(rule),
-        if (!is.null(pinned[[rule$target]])) ", except where pinned"),
-        which(!same_value(tryCatch(RULE_OPS[[rule$op]]$apply(rule, frame), error = function(e) rep(NA, nrow(frame))), x[[rule$target]]) &
-          !(pinned[[rule$target]] %||% FALSE)))),
+      lapply(accepted_rules(ds), function(rule) check_row(name, paste0(rule$target, " = ", rule_label(rule)),
+        which(!same_value(tryCatch(RULE_OPS[[rule$op]]$apply(rule, frame), error = function(e) rep(NA, nrow(frame))), x[[rule$target]])))),
       Map(function(start, end) check_row(name, sprintf("%s on or before %s", start, end), which(x[[start]] > x[[end]])),
         starts[ends %in% names(x)], ends[ends %in% names(x)]),
-      timeline_checks(study, data, name, frame, pinned))
+      implication_checks(study, name, x, frame))
   }
   # Supplemental qualifiers are generated as columns of their parent: once unfolded they
   # must point to parent records. Trial design datasets are copied unchanged.
@@ -42,78 +39,16 @@ coherence_checks <- function(study, generated) {
   do.call(rbind, rows)
 }
 
-# Records whose date a pin set: they keep the DM date where a rule or their visit gives another.
-pinned_records <- function(ds, x, dm) {
-  out <- list()
-  for (p in Filter(function(p) p$column %in% names(x) && p$target %in% names(dm), ds$pins)) {
-    m <- dm[[p$target]][match(x$USUBJID, dm$USUBJID)]
-    rows <- if (p$where == "-") TRUE else eval(parse(text = p$where), x) %in% TRUE
-    out[[p$column]] <- (out[[p$column]] %||% FALSE) | (rows & !is.na(m) & same_value(x[[p$column]], m))
-  }
-  out
-}
-
-# One check per timeline edge that ends in this dataset (see `timeline_edges()`), and fatal
-# outcomes only in subjects with a death date. Pin and milestone checks list subjects, the
-# others records.
-timeline_checks <- function(study, data, name, frame, pinned = list()) {
+# Implications of sampled categories (see spine.R), at the node's level rows.
+implication_checks <- function(study, name, x, frame) {
   ds <- study$datasets[[name]]
-  x <- data[[name]]
-  dm <- data$DM
-  edges <- timeline_edges(study)
-  edges <- edges[edge_dataset(edges$to) == name, , drop = FALSE]
-  column <- function(node) sub("^[^.]+\\.", "", node)
-  label <- function(node) if (edge_dataset(node) == name) column(node) else node
-  value <- function(node) {
-    v <- if (edge_dataset(node) == name) x[[column(node)]] %||% frame[[column(node)]] else frame[[node]]
-    if (is.null(v)) stop(node, " is not generated")
-    as.numeric(v)
-  }
-  outcome <- x[[paste0(ds$prefix, "OUT")]]
-  dead <- !is.na(dm$DTHDTC[match(x$USUBJID, dm$USUBJID)] %||% NA)
-  c(lapply(seq_len(nrow(edges)), function(i) {
-    e <- edges[i, ]
-    switch(e$kind,
-      order = , bound = check_row(name, sprintf("%s on or %s %s", label(e$to), if (e$relation == ">=") "after" else "before", label(e$from)),
-        tryCatch(which(if (e$relation == ">=") value(e$to) < value(e$from) else value(e$to) > value(e$from)), error = conditionMessage)),
-      pin = {
-        p <- list(dataset = name, column = column(e$to), pick = sub("= ", "", e$relation), where = e$where, target = column(e$from))
-        v <- pin_value(p, data, dm$USUBJID)
-        checked <- if (e$all) rep(TRUE, nrow(dm)) else !is.na(dm[[p$target]]) & !is.na(v)
-        check_row(name, pin_label(p), dm$USUBJID[checked & !same_value(v, dm[[p$target]])])
-      },
-      milestone = {
-        m <- as.numeric(dm[[column(e$from)]])[match(x$USUBJID, dm$USUBJID)]
-        to <- value(e$to)
-        hit <- tapply(!is.na(m) & !is.na(to) & to == m, x$USUBJID, any)
-        has <- tapply(!is.na(m), x$USUBJID, any)
-        check_row(name, sprintf("%s is the date of one of the subject's %s visits", e$from, VISIT_HUB), names(hit)[has & !hit])
-      },
-      visit = check_row(name, sprintf("Every subject visit is in %s", VISIT_HUB), which(!visit_keys(x) %in% visit_keys(data[[VISIT_HUB]]))),
-      `on visit` = {
-        start <- frame[[e$from]]
-        end <- frame[[paste0(VISIT_HUB, ".", sub("STDTC$", "ENDTC", column(e$from)))]] %||% start
-        to <- x[[column(e$to)]]
-        check_row(name, sprintf("%s within the %s visit's dates", label(e$to), VISIT_HUB),
-          which((to < start | to > end) & !(pinned[[column(e$to)]] %||% FALSE)))
-      },
-      collected = {
-        sv <- data[[VISIT_HUB]]
-        to <- x[[column(e$to)]]
-        check_row(name, sprintf("%s is the date of one of the subject's %s visits", label(e$to), VISIT_HUB),
-          which(!is.na(to) & !paste(x$USUBJID, as.numeric(to)) %in% paste(sv$USUBJID, as.numeric(sv[[column(e$from)]]))))
-      },
-      span = {
-        first <- startsWith(e$relation, "first")
-        at <- as.numeric(subject_date(data, e$from, x$USUBJID))
-        gap <- (if (first) 1 else -1) * (as.numeric(x[[column(e$to)]]) - at)
-        late <- tapply(gap, x$USUBJID, function(z) !all(is.na(z)) && min(z, na.rm = TRUE) > 0)
-        check_row(name, sprintf("Subject's %s %s %s", if (first) "first" else "last", label(e$to),
-          if (first) paste("on or before", e$from) else paste("on or after", e$from)), names(late)[late])
-      })
-  }),
-  if (isTRUE(ds$links$fatal >= SHARE_TO_PROPOSE) && !is.null(outcome)) list(check_row(name, "Fatal outcomes only in subjects with a death date",
-    which(outcome %in% "FATAL" & !dead))))
+  fits <- study$fits[[name]]$nodes
+  lapply(names(Filter(function(f) !is.null(f$implications), fits)), function(v) {
+    level <- if (name == "DM") "record" else ds$levels[[v]]
+    rows <- level_rows(frame, level, ds$structure)
+    check_row(name, sprintf("%s keeps its %d implications", v, nrow(fits[[v]]$implications)),
+      rows[implication_violations(fits[[v]]$implications, x[[v]][rows], frame[rows, , drop = FALSE])])
+  })
 }
 
 # ---- Comparisons ----------------------------------------------------------------------

@@ -68,12 +68,12 @@ graph_colors <- c(lapply(TYPE_COLORS, function(name) tint(COLORS[[name]], c(0.8,
 dot_id <- function(x) paste0('"', gsub('"', "", x), '"')
 
 # One dataset's graph: its generated nodes plus the inputs from DM and earlier datasets
-# that it declares or uses (in rules, predictors, window and record counts), drawn
+# that it declares or uses (in rules and predictors), drawn
 # by www/graph.js. The selected node is outlined and its edges stay highlighted.
 graph_view <- function(id, ds, selected = NULL) {
   nodes <- generated_variables(ds)
   parents <- lapply(nodes, function(v) node_parents(ds, v))
-  inputs <- unique(c(ds$inputs, grep("^(DM|N|SERIES)\\.|\\.(FIRST|LAST)$", c(unlist(parents), unlist(ds$window), ds$structure$predictors), value = TRUE)))
+  inputs <- unique(c(ds$inputs, grep("^(DM|N|SERIES|T)\\.", unlist(parents), value = TRUE)))
   node_line <- function(v, type, label) {
     colors <- graph_colors[[type]]
     sprintf('%s [label=%s, fillcolor="%s", color="%s"%s];', dot_id(v), dot_id(label), colors[1],
