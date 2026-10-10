@@ -4,7 +4,10 @@
 # A fitted node is a set of parts, one per test (findings) and stage (the first record of a
 # series, or a later one given the previous value). Each part models one value:
 #   categories          multinomial over the observed values, missing being a value
-#   normal / lognormal  whether a value is recorded, then a linear model of the value
+#   number              whether a value is recorded, then a linear model of its normal score
+#                       (its percentile in the source, on the normal scale); a drawn score is
+#                       read back through the source's percentiles, so the value keeps the
+#                       source's shape, range and repeated values (a dose of 1 mg)
 #   tree                a classification or regression tree (CART, as in synthpop): a value
 #                       is drawn from the counts of its leaf, or a number from its quantiles
 # Fits keep coefficients and summaries only, never source rows; implications keep the
@@ -13,7 +16,8 @@
 MIN_LEVEL_COUNT <- 5
 MAX_MODEL_LEVELS <- 30
 MAX_DISCRETE_VALUES <- 10
-NODE_MODELS <- c(auto = "Linear (automatic)", normal = "Normal", lognormal = "Log-normal", categories = "Categories", tree = "Tree (CART)")
+NUMBER_QUANTILES <- seq(0, 1, 0.01)
+NODE_MODELS <- c(auto = "Linear (automatic)", number = "Linear (number)", categories = "Categories", tree = "Tree (CART)")
 # The model of a new node: "auto" for the linear models (the default), or "tree" (option
 # synth.model, or SYNTH_MODEL in the environment, which the workers share).
 default_node_model <- function() getOption("synth.model", Sys.getenv("SYNTH_MODEL", "auto"))
@@ -96,7 +100,7 @@ part_aic <- function(y, X, type) {
     return(nnet::multinom(formula, data = data, weights = tabulate(match(key, key[rows])), trace = FALSE, MaxNWts = 1e6, maxit = 200)$AIC)
   }
   observed <- !is.na(y)
-  z <- if (type == "lognormal") log(y[observed]) else y[observed]
+  z <- y[observed]
   fit <- stats::lm.fit(X[observed, , drop = FALSE], z)
   length(z) * log(max(sum(fit$residuals^2), 1e-12) / length(z)) + 2 * fit$rank
 }
@@ -139,7 +143,7 @@ fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL) {
     return(c(fit_multinomial(X, match(values, levels), length(levels)),
       list(type = type, columns = columns, levels = levels, numeric = is.numeric(y))))
   }
-  z <- if (type == "lognormal") log(y[observed]) else y[observed]
+  z <- y[observed]
   X_obs <- X[observed, , drop = FALSE]
   fit <- stats::lm.fit(X_obs, z)
   sigma <- sqrt(sum(fit$residuals^2) / max(1, length(z) - fit$rank))
@@ -147,8 +151,7 @@ fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL) {
   list(type = type, columns = columns, sigma = sigma,
     coef = matrix(ifelse(is.na(fit$coefficients), 0, fit$coefficients), 1, dimnames = list(NULL, colnames(X))),
     se = matrix(sigma * sqrt(pmax(variance, 0)), 1, dimnames = list(NULL, colnames(X))),
-    recorded = if (!all(observed)) fit_multinomial(X, 2L - observed, 2L),
-    digits = decimals(y[observed]), range = range(y[observed]), grid = value_grid(y[observed]))
+    recorded = if (!all(observed)) fit_multinomial(X, 2L - observed, 2L))
 }
 
 # Values on a grid coarser than their decimals (whole mg/dL converted to mmol/L: glucose
@@ -163,7 +166,12 @@ value_grid <- function(v) {
   unname(fit$coefficients)
 }
 
-model_scale <- function(type, x) if (identical(type, "lognormal")) log(pmax(x, 1e-8)) else x
+# Normal score of x given a number's source percentiles q: its percentile (a repeated value
+# the middle of its percentiles), on the normal scale.
+normal_score <- function(q, x) {
+  u <- stats::approx(q, NUMBER_QUANTILES, x, ties = mean, rule = 2)$y
+  stats::qnorm(pmin(pmax(u, 0.005), 0.995))
+}
 
 # The model part of each record: its test, and whether it follows an earlier value of its
 # series.
@@ -175,8 +183,8 @@ node_parts <- function(ds, variable, frame, previous) {
 
 # A node is fitted on one row per subject, per subject and visit, or per record. The model
 # type is chosen once per test, so first and later records share a scale: categories for
-# text and numbers with few values, otherwise normal, or log-normal when positive and
-# skewed. A trajectory's first record is fitted without the arm (it is measured before
+# text and numbers with few values, otherwise numbers (on their normal scores, with the
+# source's percentiles of the test). A trajectory's first record is fitted without the arm (it is measured before
 # treatment); later records add the previous recorded value. A category also keeps its
 # implications (see spine.R).
 fit_node <- function(ds, variable, frame, arm) {
@@ -201,20 +209,23 @@ fit_node <- function(ds, variable, frame, arm) {
   coarse <- coarse_values(ds, variable, y, frame)
   types <- vapply(split(y, parts$scale), function(v) {
     v <- v[!is.na(v)]
-    if (!is.numeric(v) || model == "categories" || (model == "auto" && length(unique(v)) <= MAX_DISCRETE_VALUES))
-      return("categories")
-    skew <- if (length(v) > 2 && stats::sd(v) > 0) mean((v - mean(v))^3) / stats::sd(v)^3 else 0
-    if (all(v > 0) && (model == "lognormal" || (model == "auto" && skew > 1))) "lognormal" else "normal"
+    if (!is.numeric(v) || model == "categories" || (model == "auto" && length(unique(v)) <= MAX_DISCRETE_VALUES) || length(unique(v)) < 2)
+      "categories" else "number"
   }, "")
+  margins <- lapply(split(y, parts$scale), function(v) if (is.numeric(v)) stats::quantile(v, NUMBER_QUANTILES, na.rm = TRUE, names = FALSE))
   fits <- lapply(split(seq_along(y), parts$key), function(i) {
     follow <- grepl("|follow", parts$key[i[1]], fixed = TRUE)
     type <- unname(types[match(parts$scale[i[1]], names(types))])
+    margin <- if (type == "number" && !tree) margins[[match(parts$scale[i[1]], names(margins))]]
     records <- frame[i, , drop = FALSE]
-    records$.previous <- model_scale(if (tree) "tree" else type, previous[i])
+    records$.previous <- if (is.null(margin)) previous[i] else normal_score(margin, previous[i])
     used <- if (follow) c(predictors, ".previous") else if (isTRUE(node$prev)) setdiff(predictors, arm) else predictors
     if (tree) return(fit_tree(y[i], records, used, type == "categories"))
     info <- design_info(records, used, c("VISITNUM", s$test))
-    c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i]), list(info = info))
+    if (type == "categories") return(c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i]), list(info = info)))
+    v <- y[i][!is.na(y[i])]
+    c(fit_part(normal_score(margin, y[i]), design_matrix(info, records), type, design_groups(info)),
+      list(info = info, margin = margin, digits = decimals(v), grid = value_grid(v)))
   })
   # Implications are found within a test: the last visit gives PROTOCOL COMPLETED to the
   # disposition event, not to the subject's other DS records.
@@ -360,11 +371,7 @@ draw_tree <- function(p, records) {
     drawn[drawn == MISSING] <- NA
     return(if (p$numeric) as.numeric(drawn) else drawn)
   }
-  q <- p$quantiles[tree_leaf(p$tree, x), , drop = FALSE]
-  # Inverse of the leaf's distribution function, linear between its quantiles.
-  u <- stats::runif(nrow(q)) * (length(TREE_QUANTILES) - 1)
-  k <- pmin(floor(u), length(TREE_QUANTILES) - 2)
-  drawn <- q[cbind(seq_len(nrow(q)), k + 1)] + (u - k) * (q[cbind(seq_len(nrow(q)), k + 2)] - q[cbind(seq_len(nrow(q)), k + 1)])
+  drawn <- quantile_draw(p$quantiles[tree_leaf(p$tree, x), , drop = FALSE])
   if (!is.null(p$grid)) drawn <- p$grid[1] + round((drawn - p$grid[1]) / p$grid[2]) * p$grid[2]
   drawn <- round(drawn, p$digits)
   if (!is.null(p$recorded)) drawn[draw_from_counts(p$recorded$counts, tree_leaf(p$recorded$tree, x)) == "FALSE"] <- NA
@@ -372,6 +379,15 @@ draw_tree <- function(p, records) {
 }
 
 # ---- Drawing --------------------------------------------------------------------------
+
+# The value at probability u of each row of q (equally spaced quantiles of a distribution),
+# linear between quantiles; repeated quantiles give a repeated value.
+quantile_draw <- function(q, u = stats::runif(nrow(q))) {
+  u <- u * (ncol(q) - 1)
+  k <- pmin(floor(u), ncol(q) - 2)
+  rows <- seq_len(nrow(q))
+  q[cbind(rows, k + 1)] + (u - k) * (q[cbind(rows, k + 2)] - q[cbind(rows, k + 1)])
+}
 
 # Codes 1..k drawn from the multinomial probabilities of each row of linear predictors.
 softmax_draw <- function(eta) {
@@ -388,7 +404,7 @@ draw_records <- function(ds, variable, fit, frame, previous) {
     p <- fit$parts[[key]]
     i <- which(parts$key == key)
     records <- frame[i, , drop = FALSE]
-    records$.previous <- model_scale(p$type, previous[i])
+    records$.previous <- if (is.null(p$margin)) previous[i] else normal_score(p$margin, previous[i])
     if (p$type == "tree") {
       values[i] <- draw_tree(p, records)
       next
@@ -401,9 +417,8 @@ draw_records <- function(ds, variable, fit, frame, previous) {
       drawn[drawn == MISSING] <- NA
       if (p$numeric) drawn <- as.numeric(drawn)
     } else {
-      drawn <- stats::rnorm(length(i), drop(eta), p$sigma)
-      if (p$type == "lognormal") drawn <- exp(drawn)
-      drawn <- pmin(pmax(drawn, p$range[1]), p$range[2])
+      u <- stats::pnorm(stats::rnorm(length(i), drop(eta), p$sigma))
+      drawn <- quantile_draw(matrix(p$margin, length(i), length(p$margin), byrow = TRUE), u)
       if (!is.null(p$grid)) drawn <- p$grid[1] + round((drawn - p$grid[1]) / p$grid[2]) * p$grid[2]
       drawn <- round(drawn, p$digits)
       if (!is.null(p$recorded)) drawn[softmax_draw(X %*% t(p$recorded$coef)) == 2] <- NA

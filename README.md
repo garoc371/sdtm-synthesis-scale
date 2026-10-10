@@ -39,7 +39,7 @@ The spine columns of a dataset are its dates, timing variables (VISITNUM, VISIT,
 
 ## Node models
 
-A sampled node is fitted per test and per stage (first record of a series, or a later one given the previous value). `auto` is the default. `tree` broke more source relations than `auto` (pilot 12 against 9, bench28 39 against 32) but matched numeric distributions more closely (mean KS 0.03 against 0.09; CMDOSE 0.05 against 0.39), because a normal or log-normal error cannot put mass on repeated values or zeros. `auto` picks categories (multinomial, missing being a value) for at most a few distinct values, otherwise a normal or log-normal linear model with a model of whether the value is recorded. A category with more than 30 values has too many to model; when an accepted lookup derives a coarser category from it alone, that one is modelled and the value drawn within it by its frequencies (DSDECOD on arm and last visit, then the verbatim DSTERM within it), otherwise it is drawn from its frequencies. `tree` fits a classification tree for categories and a regression tree for numbers (with a classification tree of whether it is recorded); leaves have at least 5 records, and a value is drawn from its leaf's class counts or, for a number, between its leaf's 21 quantiles. Implications are kept with either model. A tree stores split points and per-leaf counts or quantiles, so a leaf of 5 records discloses more about those records than a coefficient does.
+A sampled node is fitted per test and per stage (first record of a series, or a later one given the previous value). `auto` is the default: categories (multinomial, missing being a value) for at most 10 distinct values, otherwise a number: a model of whether it is recorded, then a linear model of its normal score (its percentile in the source, on the normal scale). A drawn score is read back through the test's 101 source percentiles, so a value keeps the source's shape, range and repeated values (a dose of 54 mg, a zero). `tree` matches distributions about as closely (bench28 mean KS 0.025 against 0.029) and, on seeds 1–3, broke fewer source relations (pilot 12 against 14, bench28 39 against 58); over six seeds `auto` broke 64 ± 17 per seed on bench28, nearly all in two targets that draws alone decide (SUPPTR.QVAL, DS.DSDECOD). A category with more than 30 values has too many to model; when an accepted lookup derives a coarser category from it alone, that one is modelled and the value drawn within it by its frequencies (DSDECOD on arm and last visit, then the verbatim DSTERM within it), otherwise it is drawn from its frequencies. `tree` fits a classification tree for categories and a regression tree for numbers (with a classification tree of whether it is recorded); leaves have at least 5 records, and a value is drawn from its leaf's class counts or, for a number, between its leaf's 21 quantiles. Implications are kept with either model. A tree stores split points and per-leaf counts or quantiles, so a leaf of 5 records discloses more about those records than a coefficient does; `auto` stores a test's 101 percentiles, whose ends are its source minimum and maximum.
 
 ## Record structures
 
@@ -60,10 +60,10 @@ DM has one record per subject. Findings (--TESTCD) and datasets with one record 
 
 | | datasets | app checks failed | relations failing | mean TVD | mean KS |
 |---|---|---|---|---|---|
-| pilot | 10 | 0 of 127 | 9 | 0.050 | 0.090 |
-| bench28 | 28 | 0 of 255 | 32 | 0.041 | 0.087 |
-| bench72 | 72 | 0 of 761 | 219 | 0.051 | 0.108 |
+| pilot | 10 | 0 of 127 | 14 | 0.049 | 0.036 |
+| bench28 | 28 | 0 of 255 | 58 | 0.039 | 0.029 |
+| bench72 | 72 | 0 of 761 | 228 | 0.049 | 0.034 |
 
-bench72 builds in 305 s with 8 workers, 2.4 GB at most.
+Seeds 1–3. Failing relations vary a lot by seed (bench28: 37 to 77 per seed); a change is judged on several seeds, not on one run. bench72 builds in 305 s with 8 workers, 2.4 GB at most.
 
 Data: [CDISC pilot project](https://github.com/cdisc-org/sdtm-adam-pilot-project), study CDISCPILOT01.
