@@ -17,7 +17,8 @@
 #                when only the first, N when neither
 #   T.DIED       Y when the subject has a death date
 #   T.EXPOSED    days from first to last exposure, both included
-#   T.LASTVISIT  the subject's last visit number in SV
+#   T.LASTVISIT  the subject's last visit number in SV, among the visits that mark progress
+#                (progress_visits: not an AE follow-up after an early stop)
 #   T.<DATASET>  Y when the subject has records in that dataset (T.AE)
 #   T.PHASE      the record's main date before, during or after the reference period
 #   T.<D>=<M>    Y when the record's date D is the subject's DM date M (a DS date on DTHDTC)
@@ -99,6 +100,24 @@ draw_spine <- function(spine, donors, ids) {
   })
 }
 
+# The visits that mark how far a subject went, in number order: a visit counts when most of
+# its subjects attended the latest counted visit with at least as many subjects. Visits after
+# an early stop (AE FOLLOW-UP 101, RETRIEVAL 201) mostly lack the last scheduled visit, so a
+# subject who stopped at week 8 does not look like one who went past week 26.
+progress_visits <- function(sv) {
+  number <- as.numeric(sv$VISITNUM)
+  subjects <- lapply(split(sv$USUBJID, number), unique)
+  visits <- as.numeric(names(subjects))
+  size <- lengths(subjects)
+  kept <- 1L
+  for (i in seq_along(visits)[-1]) {
+    ref <- kept[size[kept] >= size[i]]
+    ref <- if (length(ref)) ref[length(ref)] else kept[1]
+    if (mean(subjects[[i]] %in% subjects[[ref]]) >= 0.5) kept <- c(kept, i)
+  }
+  visits[kept]
+}
+
 # Subject-level spine features for `ids`, from DM's dates, SV's visits and which datasets
 # have their records.
 spine_subjects <- function(data, ids) {
@@ -112,7 +131,10 @@ spine_subjects <- function(data, ids) {
   out <- data.frame(T.TREATED = ifelse(is.na(start), "N", ifelse(is.na(end), "STARTED", "Y")), T.DIED = ifelse(is.na(date("DTHDTC")), "N", "Y"),
     T.EXPOSED = end - start + 1, stringsAsFactors = FALSE)
   sv <- data[[VISIT_HUB]]
-  last <- if (!is.null(sv$VISITNUM)) tapply(as.numeric(sv$VISITNUM), sv$USUBJID, max, na.rm = TRUE)
+  last <- if (!is.null(sv$VISITNUM)) {
+    sv <- sv[as.numeric(sv$VISITNUM) %in% progress_visits(sv), , drop = FALSE]
+    tapply(as.numeric(sv$VISITNUM), sv$USUBJID, max, na.rm = TRUE)
+  }
   out$T.LASTVISIT <- if (is.null(last)) NA_character_ else format_value(unname(last[ids]))
   for (d in setdiff(names(data), "DM")) out[[paste0("T.", d)]] <- ifelse(ids %in% data[[d]]$USUBJID, "Y", "N")
   out
