@@ -101,11 +101,19 @@ part_aic <- function(y, X, type) {
   length(z) * log(max(sum(fit$residuals^2), 1e-12) / length(z)) + 2 * fit$rank
 }
 
-# One model part. Predictors are used only with at least 10 values per coefficient; for
+# One model part. A category with too many values to model and a coarser category derived
+# from it (`coarse`) models the coarse value; its values are drawn within the coarse one by
+# their frequencies. Predictors are used only with at least 10 values per coefficient; for
 # categories, 10 values outside the most common one (a rare value is not learnt per level).
 # When not all of them fit, whole predictors are added one at a time, the one that lowers
 # the AIC most first, while they fit and lower it (36 retrieval terms keep the visit).
-fit_part <- function(y, X, type, groups = colnames(X)) {
+fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL) {
+  if (type == "categories" && !is.null(coarse) && length(unique(level_string(y))) > MAX_MODEL_LEVELS) {
+    fit <- fit_part(coarse, X, type, groups)
+    fit$within <- lapply(split(level_string(y), level_string(coarse)), function(v) table(v))
+    fit$numeric <- is.numeric(y)
+    return(fit)
+  }
   observed <- !is.na(y)
   if (!any(observed)) type <- "categories"
   values <- table(level_string(y))
@@ -190,6 +198,7 @@ fit_node <- function(ds, variable, frame, arm) {
   predictors <- intersect(node$predictors, names(frame))
   tree <- node$model == "tree"
   model <- if (tree) "auto" else node$model
+  coarse <- coarse_values(ds, variable, y, frame)
   types <- vapply(split(y, parts$scale), function(v) {
     v <- v[!is.na(v)]
     if (!is.numeric(v) || model == "categories" || (model == "auto" && length(unique(v)) <= MAX_DISCRETE_VALUES))
@@ -205,7 +214,7 @@ fit_node <- function(ds, variable, frame, arm) {
     used <- if (follow) c(predictors, ".previous") else if (isTRUE(node$prev)) setdiff(predictors, arm) else predictors
     if (tree) return(fit_tree(y[i], records, used, type == "categories"))
     info <- design_info(records, used, c("VISITNUM", s$test))
-    c(fit_part(y[i], design_matrix(info, records), type, design_groups(info)), list(info = info))
+    c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i]), list(info = info))
   })
   # Implications are found within a test: the last visit gives PROTOCOL COMPLETED to the
   # disposition event, not to the subject's other DS records.
@@ -229,6 +238,20 @@ fit_node <- function(ds, variable, frame, arm) {
     if (reduced) sprintf(", fewer predictors in %d of %d parts (few values)", reduced, length(fits)) else "",
     if (NROW(implications)) sprintf(", %d implication%s", nrow(implications), if (nrow(implications) > 1) "s" else "") else "")
   list(parts = fits, arm = arm, description = description, implications = implications)
+}
+
+# The values of the coarsest useful category derived from a node by an accepted lookup on
+# the node alone (DSDECOD from 36 verbatim DSTERM terms, a body system from AELLT): the one
+# with most values, at most MAX_MODEL_LEVELS. NULL when there is none.
+coarse_values <- function(ds, variable, y, frame) {
+  rules <- Filter(function(r) r$op == "lookup" && identical(r$inputs, variable), accepted_rules(ds))
+  if (!length(rules)) return(NULL)
+  values <- level_string(y)
+  first <- frame[!duplicated(values), , drop = FALSE]
+  derived <- lapply(rules, function(r) level_string(RULE_OPS$lookup$apply(r, first))[match(values, level_string(first[[variable]]))])
+  n <- vapply(derived, function(d) length(unique(d)), 0L)
+  ok <- which(n > 1 & n <= MAX_MODEL_LEVELS)
+  if (length(ok)) derived[[ok[which.max(n[ok])]]]
 }
 
 # A node's rows: one per subject, per subject and visit, per series, or every record.
@@ -374,6 +397,7 @@ draw_records <- function(ds, variable, fit, frame, previous) {
     eta <- X %*% t(p$coef)
     if (p$type == "categories") {
       drawn <- p$levels[softmax_draw(eta)]
+      if (!is.null(p$within)) drawn <- vapply(drawn, function(g) { w <- p$within[[g]]; names(w)[sample.int(length(w), 1, prob = w)] }, "")
       drawn[drawn == MISSING] <- NA
       if (p$numeric) drawn <- as.numeric(drawn)
     } else {
