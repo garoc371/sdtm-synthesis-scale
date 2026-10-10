@@ -64,6 +64,6 @@ DM has one record per subject. Findings (--TESTCD) and datasets with one record 
 | bench28 | 28 | 0 of 255 | 58 | 0.039 | 0.029 |
 | bench72 | 72 | 0 of 761 | 228 | 0.049 | 0.034 |
 
-Seeds 1–3. Failing relations vary a lot by seed (bench28: 37 to 77 per seed); a change is judged on several seeds, not on one run. bench72 builds in 305 s with 8 workers, 2.4 GB at most.
+Seeds 1–3. Failing relations vary a lot by seed (bench28: 37 to 77 per seed); a change is judged on several seeds, not on one run. With 8 workers bench72 builds in 52 s (1.2 GB in the main process); a 2,540-subject study generated from bench28 (3.3 million records, QS 1 million) builds in 209 s (2.7 GB) and its longest job is QS.
 
 Data: [CDISC pilot project](https://github.com/cdisc-org/sdtm-adam-pilot-project), study CDISCPILOT01.

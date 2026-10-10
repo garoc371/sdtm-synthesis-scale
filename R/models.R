@@ -59,10 +59,12 @@ design_matrix <- function(info, frame) {
 
 # ---- Fits ------------------------------------------------------------------------------
 
-# Coefficients of codes 2..k against code 1, one row per code, with standard errors of
-# the same shape. Without predictors, or with too many values to model, the estimates are
-# the observed log odds; identical design rows are otherwise fitted once, weighted.
-fit_multinomial <- function(X, codes, k) {
+# Coefficients of codes 2..k against code 1, one row per code, and with `se` standard errors
+# of the same shape (only a node drawn with its uncertainty needs them; the Hessian costs a
+# product per distinct design row, most of a large dataset's fit). Without predictors, or
+# with too many values to model, the estimates are the observed log odds; identical design
+# rows are otherwise fitted once, weighted.
+fit_multinomial <- function(X, codes, k, se = FALSE) {
   zero <- matrix(0, k - 1, ncol(X), dimnames = list(NULL, colnames(X)))
   if (k == 1) return(list(coef = zero, se = zero))
   if (ncol(X) == 1 || k > MAX_MODEL_LEVELS) {
@@ -76,13 +78,12 @@ fit_multinomial <- function(X, codes, k) {
   rows <- which(!duplicated(key))
   data <- data.frame(.y = factor(codes[rows], levels = seq_len(k)), X[rows, -1, drop = FALSE])
   names(data)[-1] <- paste0("x", seq_len(ncol(X) - 1))
-  fit <- nnet::multinom(.y ~ ., data = data, weights = tabulate(match(key, key[rows])), Hess = TRUE,
+  fit <- nnet::multinom(.y ~ ., data = data, weights = tabulate(match(key, key[rows])), Hess = se,
     trace = FALSE, MaxNWts = 1e6, maxit = 200)
   coef <- matrix(stats::coef(fit), k - 1, dimnames = dimnames(zero))
   coef[is.na(coef)] <- 0
-  se <- tryCatch(matrix(sqrt(pmax(diag(solve(fit$Hessian)), 0)), k - 1, byrow = TRUE, dimnames = dimnames(zero)),
-    error = function(e) zero)
-  list(coef = coef, se = se)
+  list(coef = coef, se = if (se) tryCatch(matrix(sqrt(pmax(diag(solve(fit$Hessian)), 0)), k - 1, byrow = TRUE, dimnames = dimnames(zero)),
+    error = function(e) zero) else zero)
 }
 
 # The design column of each predictor ("" for the intercept).
@@ -111,9 +112,9 @@ part_aic <- function(y, X, type) {
 # categories, 10 values outside the most common one (a rare value is not learnt per level).
 # When not all of them fit, whole predictors are added one at a time, the one that lowers
 # the AIC most first, while they fit and lower it (36 retrieval terms keep the visit).
-fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL) {
+fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL, se = FALSE) {
   if (type == "categories" && !is.null(coarse) && length(unique(level_string(y))) > MAX_MODEL_LEVELS) {
-    fit <- fit_part(coarse, X, type, groups)
+    fit <- fit_part(coarse, X, type, groups, se = se)
     fit$within <- lapply(split(level_string(y), level_string(coarse)), function(v) table(v))
     fit$numeric <- is.numeric(y)
     return(fit)
@@ -140,7 +141,7 @@ fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL) {
   if (type == "categories") {
     values <- level_string(y)
     levels <- names(sort(table(values), decreasing = TRUE))
-    return(c(fit_multinomial(X, match(values, levels), length(levels)),
+    return(c(fit_multinomial(X, match(values, levels), length(levels), se),
       list(type = type, columns = columns, levels = levels, numeric = is.numeric(y))))
   }
   z <- y[observed]
@@ -222,7 +223,7 @@ fit_node <- function(ds, variable, frame, arm) {
     used <- if (follow) c(predictors, ".previous") else if (isTRUE(node$prev)) setdiff(predictors, arm) else predictors
     if (tree) return(fit_tree(y[i], records, used, type == "categories"))
     info <- design_info(records, used, c("VISITNUM", s$test))
-    if (type == "categories") return(c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i]), list(info = info)))
+    if (type == "categories") return(c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i], isTRUE(node$vary)), list(info = info)))
     v <- y[i][!is.na(y[i])]
     c(fit_part(normal_score(margin, y[i]), design_matrix(info, records), type, design_groups(info)),
       list(info = info, margin = margin, digits = decimals(v), grid = value_grid(v)))
