@@ -29,7 +29,7 @@ table.dataTable tbody tr.selected > * { box-shadow: inset 0 0 0 9999px rgba(var(
 .card[data-full-screen="true"] .dag { height: 100%; }
 .card[data-full-screen="true"] .dag-canvas { flex: 1; height: auto; min-height: 0; }
 .dag-canvas:focus-visible { box-shadow: inset 0 0 0 2px rgba(var(--bs-primary-rgb), 0.35); }
-.dag-canvas.panning { cursor: grabbing; }
+.dag-canvas.panning, .dag-canvas.moving, .dag-canvas.moving g.node { cursor: grabbing; }
 .dag-canvas > svg { width: 100%; height: 100%; display: block; }
 .dag-canvas g.node { cursor: pointer; outline: none; transition: opacity 0.12s; }
 .dag-canvas g.node text { font-family: Manrope, system-ui, sans-serif; font-weight: 650; pointer-events: none; user-select: none; }

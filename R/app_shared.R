@@ -84,7 +84,7 @@ graph_view <- function(id, ds, selected = NULL) {
   rule <- vapply(to, node_type, "", ds = ds) == "rule"
   dot <- c(
     "digraph G {",
-    'graph [rankdir=TB, nodesep=0.1, ranksep=0.5, bgcolor="transparent", pad=0.2];',
+    'graph [rankdir=TB, nodesep=0.4, ranksep=0.9, bgcolor="transparent", pad=0.2];',
     'node [shape=box, style="rounded,filled", fontname="Manrope", fontsize=13, height=0.36, margin="0.14,0.06", penwidth=1.2];',
     'edge [arrowsize=0.6, penwidth=1];',
     if (length(inputs)) c("subgraph cluster_inputs {", sprintf('label="Inputs"; fontname="Manrope"; fontsize=10; fontcolor="%s"; style="rounded,dashed"; color="%s";',
@@ -106,10 +106,11 @@ graph_view <- function(id, ds, selected = NULL) {
         zoom("out", "Zoom out (−)", icon("minus")),
         zoom("actual", "Actual size", class = "dag-scale fw-semibold", "100%"),
         zoom("in", "Zoom in (+)", icon("plus")),
-        zoom("fit", "Fit the whole graph (0)", icon("expand")))),
+        zoom("fit", "Fit the whole graph (0)", icon("expand")),
+        zoom("reset", "Put dragged nodes back", icon("rotate-left")))),
     div(class = "dag-canvas", tabindex = "0",
       div(class = "h-100 d-flex align-items-center justify-content-center small text-body-secondary", "Drawing graph…")),
     div(class = "d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-top bg-body small text-body-secondary",
       lapply(names(TYPE_COLORS), type_badge), badge(NA, "Input"),
-      span(class = "ms-auto d-none d-md-inline", "Click, then scroll to zoom · drag to pan · click a node to trace it, again or on the background to clear")))
+      span(class = "ms-auto d-none d-md-inline", "Click, then scroll to zoom · drag the background to pan, a node to move it · click a node to trace it, again or on the background to clear")))
 }
