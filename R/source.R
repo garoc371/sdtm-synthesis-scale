@@ -40,7 +40,7 @@ read_source <- function(files, names = basename(files)) {
       attributes(v) <- NULL
       # SAS transport files are often Latin-1.
       if (is.character(v)) v[!validUTF8(v)] <- iconv(v[!validUTF8(v)], "latin1", "UTF-8")
-      if (is.character(v)) v[!nzchar(trimws(v))] <- NA
+      if (is.character(v)) v[grepl("^[ \t\r\n]*$", v)] <- NA
       v
     })
     x
@@ -191,7 +191,11 @@ parse_number <- function(v) if (is.numeric(v)) v else suppressWarnings(as.numeri
 
 format_value <- function(x) if (inherits(x, "Date")) format(x) else as.character(x)
 
-level_string <- function(v) ifelse(is.na(v), MISSING, format_value(v))
+level_string <- function(v) {
+  s <- format_value(v)
+  s[is.na(v)] <- MISSING
+  s
+}
 
 decimals <- function(v) {
   v <- if (is.numeric(v)) format(v[!is.na(v)], scientific = FALSE, trim = TRUE, drop0trailing = TRUE) else
@@ -216,7 +220,7 @@ same_value <- function(a, b) {
 
 # One string per row of the given columns; missing values stay distinct from the text "NA".
 key_strings <- function(x) {
-  do.call(paste, c(lapply(x, function(v) ifelse(is.na(v), "\rNA", format_value(v))), sep = "\r"))
+  do.call(paste, c(lapply(x, function(v) { s <- format_value(v); s[is.na(v)] <- "\rNA"; s }), sep = "\r"))
 }
 
 # Integer group of each row by the given columns, 1 for every row when there are none.
@@ -224,6 +228,8 @@ group_index <- function(x, columns) {
   group <- rep(1L, nrow(x))
   for (v in x[columns]) {
     values <- unique(v)
+    # The first column's codes are already numbered in order of appearance.
+    if (all(group == 1L)) { group <- match(v, values); next }
     pair <- (group - 1) * length(values) + match(v, values)
     group <- match(pair, unique(pair))
   }

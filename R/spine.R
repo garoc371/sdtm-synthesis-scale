@@ -275,10 +275,17 @@ implication_rows <- function(implications, i, frame) {
 # Rows breaking an implication: a forced key value with another value, or an "only" value with another key value.
 implication_violations <- function(implications, values, frame) {
   bad <- rep(FALSE, length(values))
+  if (!NROW(implications)) return(bad)
   s <- level_string(values)
+  # Each column's strings once, not once per implication.
+  strings <- function(columns, f) lapply(stats::setNames(nm = unique(stats::na.omit(columns))), function(v) f(frame[[v]]))
+  keys <- strings(implications$key, level_string)
+  tests <- strings(implications$within, format_value)
   for (i in seq_len(NROW(implications))) {
-    key <- level_string(frame[[implications$key[i]]])
-    bad <- bad | implication_rows(implications, i, frame) & if (implications$kind[i] == "forced")
+    key <- keys[[implications$key[i]]]
+    within <- implications$within[i]
+    rows <- if (is.null(within) || is.na(within)) TRUE else tests[[within]] == implications$part[i]
+    bad <- bad | rows & if (implications$kind[i] == "forced")
       key %in% implications$level[[i]] & s != implications$value[[i]] else s %in% implications$value[[i]] & !key %in% implications$level[[i]]
   }
   bad
@@ -290,7 +297,8 @@ implication_violations <- function(implications, values, frame) {
 apply_implications <- function(implications, values, frame, redraw) {
   if (is.null(implications)) return(values)
   only <- implications[implications$kind == "only", , drop = FALSE]
-  misplaced <- function(v, rows) implication_violations(only, v, frame[rows, , drop = FALSE])
+  read <- frame[unique(c(only$key, stats::na.omit(only$within)))]
+  misplaced <- function(v, rows) implication_violations(only, v, read[rows, , drop = FALSE])
   bad <- which(misplaced(values, seq_along(values)))
   for (attempt in 1:20) {
     if (!length(bad)) break

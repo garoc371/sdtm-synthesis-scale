@@ -164,9 +164,9 @@ RULE_OPS <- list(
       info$keys[good]
     },
     learn = function(rule, frame) {
-      fit <- lookup_fit(group_index(frame, rule$inputs), group_index(frame, rule$target), record_subject(frame))
-      table <- frame[fit$first, rule$inputs, drop = FALSE]
-      table$value <- frame[[rule$target]][fit$first]
+      first <- lookup_rows(group_index(frame, rule$inputs), group_index(frame, rule$target))
+      table <- frame[first, rule$inputs, drop = FALSE]
+      table$value <- frame[[rule$target]][first]
       rownames(table) <- NULL
       list(table = table)
     },
@@ -237,7 +237,8 @@ evaluate_rule <- function(rule, frame) {
   rule$explained <- explained(rule$share, max(tabulate(code), 0) / length(code))
   test <- attr(frame, "structure")$test
   tests <- if (!is.null(test)) format_value(frame[[test]][checked])
-  rule$by_test <- if (length(tests)) data.frame(test = names(table(tests)), records = as.vector(table(tests)),
+  counts <- if (length(tests)) table(tests)
+  rule$by_test <- if (length(tests)) data.frame(test = names(counts), records = as.vector(counts),
     share = as.vector(tapply(match[checked], tests, mean)))
   rule
 }
@@ -280,8 +281,9 @@ held_out_prediction <- function(group, y_code, subject) {
   for (side in c(TRUE, FALSE)) {
     from <- half != side
     pair <- (group[from] - 1) * (max(y_code) + 1) + y_code[from]
-    count <- table(pair)
-    pair <- as.numeric(names(count))
+    values <- sort(unique(pair))
+    count <- tabulate(match(pair, values), length(values))
+    pair <- values
     best <- order(pair %/% (max(y_code) + 1), -count)
     best <- best[!duplicated(pair[best] %/% (max(y_code) + 1))]
     lookup <- rep(NA_integer_, max(group))
@@ -291,22 +293,24 @@ held_out_prediction <- function(group, y_code, subject) {
   predicted
 }
 
-# For each key group, its most common target code. `first` is the first record holding
-# that value; the shares are of the records predicted from the other half of the subjects.
-lookup_fit <- function(group, y_code, subject) {
+# For each key group, the first record holding its most common target code.
+lookup_rows <- function(group, y_code) {
   pair <- (group - 1) * (max(y_code) + 1) + y_code
   unique_pair <- unique(pair)
   first <- match(unique_pair, pair)
   count <- tabulate(match(pair, unique_pair), length(unique_pair))
   pair_group <- group[first]
   best <- order(pair_group, -count)
-  best <- best[!duplicated(pair_group[best])]
+  first[best[!duplicated(pair_group[best])]]
+}
+
+# Shares of the records predicted from the other half of the subjects.
+lookup_fit <- function(group, y_code, subject) {
   predicted <- held_out_prediction(group, y_code, subject)
   checked <- !is.na(predicted)
   total <- sum(checked)
   share <- if (total) mean(predicted[checked] == y_code[checked]) else NA
-  list(first = first[best], share = share, checked = total,
-    explained = explained(share, if (total) max(tabulate(y_code[checked])) / total))
+  list(share = share, checked = total, explained = explained(share, if (total) max(tabulate(y_code[checked])) / total))
 }
 
 # ---- Discovery -------------------------------------------------------------------------
