@@ -1,14 +1,19 @@
-# Failing real relations per label: those below 99% in most seeds (2 of 3; in any split), split into ones the imputed real data also fail ("inherited"), ones between a
+# Failing real relations per label: those broken in most seeds (2 of 3; in any split), split into ones the imputed real data also fail ("inherited"), ones between a
 # benchmark replica and a copy of the same domain ("copies": XA.XACLAS = CM.CMCLAS holds
 # only because XA copies CM's records; from the folder's manifest, when there is one) and
-# the rest.
+# the rest. A relation is broken in a seed when more of its subjects (or records) break it
+# than chance allows at 1% (one-sided binomial test at 5%): one subject of 20 is not counted.
 #   Rscript summary.R <labels...>
 source(file.path(dirname(normalizePath(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1]))), "common.R"))
 ids <- function(label) {
   r <- readRDS(file.path(OUT, paste0("check_", label, ".rds")))
   r <- r[r$real, ]
   syn <- grep("^syn", names(r), value = TRUE)
-  nf <- rowSums(sapply(syn, function(s) !is.na(r[[s]]) & r[[s]] < 0.99), dims = 1)
+  broken <- function(s) {
+    share <- r[[s]]; n <- r[[sub("^syn", "n", s)]]
+    !is.na(share) & n > 0 & stats::pbinom(round((1 - share) * n) - 1, n, 0.01, lower.tail = FALSE) < 0.05
+  }
+  nf <- rowSums(sapply(syn, broken), dims = 1)
   r <- r[nf > length(syn) / 2, ]
   r[!duplicated(paste(r$kind, r$a, r$rel, r$b)), c("kind", "a", "rel", "b")]
 }

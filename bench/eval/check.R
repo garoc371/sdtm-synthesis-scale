@@ -205,39 +205,42 @@ evaluate <- function(m, data) {
   sv <- data$SV
   svkey <- paste(sv$USUBJID, sv$VISITNUM)
   col_of <- function(node) { p <- strsplit(node, ".", fixed = TRUE)[[1]]; list(d = p[1], v = p[2]) }
-  share <- vapply(seq_len(nrow(r)), function(i) {
+  # Share of checked units (subjects or records) keeping the relation, and how many were checked.
+  kept <- function(ok) c(mean(ok), length(ok))
+  none <- c(NA_real_, 0)
+  res <- vapply(seq_len(nrow(r)), function(i) {
     a <- r$a[i]; b <- r$b[i]
     switch(r$kind[i],
       date = {
         x <- nodes[[a]]; y <- nodes[[b]]
-        if (is.null(x) || is.null(y)) return(NA_real_)
+        if (is.null(x) || is.null(y)) return(none)
         ok <- !is.na(x) & !is.na(y)
-        if (!any(ok)) return(NA_real_)
-        if (r$rel[i] == "=") mean(x[ok] == y[ok]) else mean(x[ok] <= y[ok])
+        if (!any(ok)) return(none)
+        kept(if (r$rel[i] == "=") x[ok] == y[ok] else x[ok] <= y[ok])
       },
       `record date` = {
         ca <- col_of(a); cb <- col_of(b)
         x <- data[[ca$d]]
         ok <- !is.na(x[[ca$v]]) & !is.na(x[[cb$v]])
-        if (!any(ok)) return(NA_real_)
-        if (r$rel[i] == "=") mean(x[[ca$v]][ok] == x[[cb$v]][ok]) else mean(x[[ca$v]][ok] <= x[[cb$v]][ok])
+        if (!any(ok)) return(none)
+        kept(if (r$rel[i] == "=") x[[ca$v]][ok] == x[[cb$v]][ok] else x[[ca$v]][ok] <= x[[cb$v]][ok])
       },
       visit = {
         ca <- col_of(a)
         x <- data[[ca$d]]
         k <- paste(x$USUBJID, x$VISITNUM)
-        if (r$rel[i] == "in") mean(k %in% svkey) else {
+        if (r$rel[i] == "in") kept(k %in% svkey) else {
           s <- sv$SVSTDTC[match(k, svkey)]
           ok <- !is.na(x[[ca$v]]) & !is.na(s)
           # Records whose visit is not in SV count as failures here too.
-          mean(c(x[[ca$v]][ok] == s[ok], rep(FALSE, sum(!is.na(x[[ca$v]]) & is.na(s)))))
+          kept(c(x[[ca$v]][ok] == s[ok], rep(FALSE, sum(!is.na(x[[ca$v]]) & is.na(s)))))
         }
       },
       implies = {
-        if (!a %in% colnames(M) || !b %in% colnames(M)) return(NA_real_)
+        if (!a %in% colnames(M) || !b %in% colnames(M)) return(none)
         ant <- M[, a]
-        if (!any(ant)) return(NA_real_)
-        if (r$rel[i] == "=>") mean(M[ant, b]) else mean(!M[ant, b])
+        if (!any(ant)) return(none)
+        kept(if (r$rel[i] == "=>") M[ant, b] else !M[ant, b])
       },
       fd = {
         d <- sub("\\..*$", "", a)
@@ -248,18 +251,18 @@ evaluate <- function(m, data) {
           dmc <- sub("^DM\\.", "", grep("^DM\\.", key, value = TRUE))
           x <- cbind(x, setNames(data$DM[match(x$USUBJID, data$DM$USUBJID), dmc, drop = FALSE], paste0("DM.", dmc)))
         }
-        if (!all(c(key, y) %in% names(x))) return(NA_real_)
+        if (!all(c(key, y) %in% names(x))) return(none)
         g <- do.call(paste, c(lapply(x[key], as.character), sep = "\r"))
         yy <- as.character(x[[y]]); yy[is.na(yy)] <- "\rNA"
         size <- table(g)[g]
         chk <- size >= 2
-        if (!any(chk)) return(NA_real_)
+        if (!any(chk)) return(none)
         # Share of checked records that carry their group's most common value.
         top <- tapply(yy[chk], g[chk], function(z) max(table(z)))
-        sum(top) / sum(chk)
+        c(sum(top) / sum(chk), sum(chk))
       })
-  }, 0)
-  share
+  }, numeric(2))
+  list(share = res[1, ], n = res[2, ])
 }
 
 # Is a relation about timing only (every column involved is part of the spine in the new design)?
@@ -295,9 +298,10 @@ if (sys.nframe() == 0L) {
     B <- subset_subjects(real_n, setdiff(ids, a_ids))
     m <- mine(A)
     r <- m$relations
-    r$share_B <- evaluate(m, B)
+    e <- evaluate(m, B)
+    r$share_B <- e$share; r$n_B <- e$n
     r$real <- !is.na(r$share_B) & r$share_B >= HOLD
-    for (s in seq_along(synth)) r[[paste0("syn", s)]] <- evaluate(m, synth[[s]])
+    for (s in seq_along(synth)) { e <- evaluate(m, synth[[s]]); r[[paste0("syn", s)]] <- e$share; r[[paste0("n", s)]] <- e$n }
     r$content <- involves_content(r)
     r$split <- split
     results[[split]] <- r
