@@ -148,7 +148,7 @@ main_date <- function(prefix, columns) intersect(paste0(prefix, c("STDTC", "DTC"
 # subject-level spine features. The record structure travels as an attribute.
 dataset_frame <- function(study, name, data = study$source$data) {
   x <- data[[name]]
-  if (name == "DM") x <- cbind(x, spine_subjects(data, x$USUBJID)) else {
+  if (name == "DM") x <- cbind(x[!startsWith(names(x), "T.")], spine_subjects(data, x$USUBJID)) else {
     subjects <- subject_inputs(study, data, name)
     x <- cbind(x, subjects[match(x$USUBJID, subjects$USUBJID), -1, drop = FALSE])
     x <- spine_record_features(x, study$datasets[[name]])
@@ -175,7 +175,7 @@ series_frame <- function(x, s) {
 subject_inputs <- function(study, data, name) {
   dm <- data$DM
   subjects <- data.frame(USUBJID = dm$USUBJID, stringsAsFactors = FALSE)
-  for (v in setdiff(names(dm), "USUBJID")) subjects[[paste0("DM.", v)]] <- dm[[v]]
+  for (v in setdiff(names(dm)[!startsWith(names(dm), "T.")], "USUBJID")) subjects[[paste0("DM.", v)]] <- dm[[v]]
   for (d in intersect(earlier_datasets(study, name), names(data)))
     subjects[[paste0("N.", d)]] <- as.numeric(tabulate(match(data[[d]]$USUBJID, dm$USUBJID), nrow(dm)))
   cbind(subjects, spine_subjects(data, dm$USUBJID))

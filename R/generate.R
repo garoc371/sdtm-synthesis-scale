@@ -28,6 +28,7 @@ generate_dataset <- function(study, name, built, spine) {
   s <- ds$structure
   data <- spine
   data[names(built)] <- built
+  if (!is.null(built$DM)) data$DM <- cbind(built$DM, spine$DM[match(built$DM$USUBJID, spine$DM$USUBJID), startsWith(names(spine$DM), "T."), drop = FALSE])
   data[[name]] <- spine[[name]]
   frame <- dataset_frame(study, name, data)
   width <- max(4, nchar(nrow(spine$DM)))

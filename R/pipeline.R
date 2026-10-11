@@ -197,13 +197,14 @@ set_sample <- function(b, n, seed) {
 }
 
 # What a worker needs for one dataset: its records, DM's and SV's (the spine features), the
-# subjects of earlier datasets for their record counts, and DM's graph for the arm.
+# subjects and categories of other datasets for their record counts and T.<DATASET>.<CATEGORY>,
+# and DM's graph for the arm.
 job_study <- function(study, name) {
   keep <- c("DM", VISIT_HUB, name)
   earlier <- earlier_datasets(study, name)
   s <- study[c("source", "datasets")]
-  s$source$data[setdiff(names(s$source$data), keep)] <- lapply(s$source$data[setdiff(names(s$source$data), keep)],
-    function(x) x["USUBJID"])
+  other <- setdiff(names(s$source$data), keep)
+  s$source$data[other] <- lapply(other, function(d) { x <- s$source$data[[d]]; x[intersect(c("USUBJID", paste0(d, "CAT")), names(x))] })
   s$datasets <- s$datasets[intersect(names(s$datasets), union(keep, earlier))]
   s$datasets[setdiff(names(s$datasets), keep)] <- lapply(s$datasets[setdiff(names(s$datasets), keep)], function(ds) ds["include"])
   s$fits <- list()

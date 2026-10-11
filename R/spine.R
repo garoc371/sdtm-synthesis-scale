@@ -20,6 +20,8 @@
 #   T.LASTVISIT  the subject's last visit number in SV, among the visits that mark progress
 #                (progress_visits: not an AE follow-up after an early stop)
 #   T.<DATASET>  Y when the subject has records in that dataset (T.AE)
+#   T.<DATASET>.<CATEGORY>  Y when the subject has records of that --CAT, for categories some
+#                of the dataset's subjects lack (a questionnaire not given after an early stop)
 #   T.PHASE      the record's main date before, during or after the reference period
 #   T.<D>=<M>    Y when the record's date D is the subject's DM date M (a DS date on DTHDTC)
 #   T.<D>.KNOWN  Y when the record has its date D, for dates some records lack (an adverse
@@ -76,6 +78,10 @@ spine_records <- function(study) {
   lapply(study$datasets, function(ds) {
     x <- study$source$data[[ds$name]]
     out <- data.frame(.donor = match(x$USUBJID, ids), x[ds$structure$spine], check.names = FALSE, stringsAsFactors = FALSE)
+    if (ds$name == "DM") {
+      categories <- spine_categories(study$source$data, x$USUBJID)
+      if (length(categories)) out <- cbind(out, categories)
+    }
     if (identical(ds$structure$type, "series")) out$.series <- group_index(x, c("USUBJID", ds$structure$series))
     out[!is.na(out$.donor), , drop = FALSE]
   })
@@ -137,10 +143,31 @@ spine_subjects <- function(data, ids) {
   }
   out$T.LASTVISIT <- if (is.null(last)) NA_character_ else format_value(unname(last[ids]))
   for (d in setdiff(names(data), "DM")) out[[paste0("T.", d)]] <- ifelse(ids %in% data[[d]]$USUBJID, "Y", "N")
+  stored <- startsWith(names(data$DM), "T.")
+  categories <- if (any(stored)) data$DM[match(ids, data$DM$USUBJID), stored, drop = FALSE] else spine_categories(data, ids)
+  if (length(categories)) out <- cbind(out, categories)
   out
 }
 
-spine_subject_names <- function(study) c(SPINE_SUBJECT_FEATURES, paste0("T.", setdiff(names(study$source$data), "DM")))
+# The T.<DATASET>.<CATEGORY> features. A category is not always a spine column (QSCAT follows
+# from the test), so the spine keeps them with DM's records (see `spine_records()`).
+spine_categories <- function(data, ids) {
+  out <- list()
+  for (d in setdiff(names(data), "DM")) {
+    x <- data[[d]]
+    category <- x[[paste0(d, "CAT")]]
+    if (is.null(category)) next
+    has <- ids %in% x$USUBJID
+    for (v in sort(unique(category[!is.na(category)]))) {
+      y <- ids %in% x$USUBJID[category %in% v]
+      if (any(y != has)) out[[paste0("T.", d, ".", v)]] <- ifelse(y, "Y", "N")
+    }
+  }
+  data.frame(out, check.names = FALSE, stringsAsFactors = FALSE)
+}
+
+spine_subject_names <- function(study) c(SPINE_SUBJECT_FEATURES, paste0("T.", setdiff(names(study$source$data), "DM")),
+  names(spine_categories(study$source$data, study$source$data$DM$USUBJID)))
 
 # Record-level spine features. `x` holds the records with DM's variables joined as DM.*.
 spine_record_features <- function(x, ds) {
