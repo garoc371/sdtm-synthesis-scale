@@ -107,15 +107,15 @@ part_aic <- function(y, X, type) {
 }
 
 # One model part. A category with too many values to model and a coarser category derived
-# from it (`coarse`) models the coarse value; its values are drawn within the coarse one by
-# their frequencies. Predictors are used only with at least 10 values per coefficient; for
+# from it (`coarse`) models the coarse value; its values are drawn within the coarse one (see
+# `fit_within`). Predictors are used only with at least 10 values per coefficient; for
 # categories, 10 values outside the most common one (a rare value is not learnt per level).
 # When not all of them fit, whole predictors are added one at a time, the one that lowers
 # the AIC most first, while they fit and lower it (36 retrieval terms keep the visit).
-fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL, se = FALSE) {
+fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL, se = FALSE, strata = character(), subject = seq_along(y)) {
   if (type == "categories" && !is.null(coarse) && length(unique(level_string(y))) > MAX_MODEL_LEVELS) {
     fit <- fit_part(coarse, X, type, groups, se = se)
-    fit$within <- lapply(split(level_string(y), level_string(coarse)), function(v) table(v))
+    fit$within <- fit_within(level_string(y), level_string(coarse), X, groups, strata, subject)
     fit$numeric <- is.numeric(y)
     return(fit)
   }
@@ -155,6 +155,51 @@ fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL, se = FALSE
     recorded = if (!all(observed)) fit_multinomial(X, 2L - observed, 2L))
 }
 
+# Fine values within a coarse one (`fit_part`) are also drawn within the levels of the
+# categorical predictors that tell them apart (an application-site reaction only after the
+# first dose): predictors are added one at a time while they lower the AIC. Subjects count,
+# not records (a subject's events share their last visit), so a record weighs one over its
+# subject's records. A coarse value whose predictor levels have fewer than MIN_LEVEL_COUNT
+# subjects uses its table over all levels.
+fit_within <- function(fine, coarse, X, groups, strata, subject) {
+  weight <- 1 / as.vector(table(subject)[subject])
+  big <- function(key) { n <- tapply(subject, key, function(s) length(unique(s))); key %in% names(n)[n >= MIN_LEVEL_COUNT] }
+  share <- function(key) { cell <- paste(key, fine, sep = "\t"); as.vector(table(cell)[cell] / table(key)[key]) }
+  overall <- share(coarse)
+  cells <- function(by) paste(coarse, if (length(by)) do.call(paste, c(as.data.frame(X[, groups %in% by, drop = FALSE]), sep = " ")), sep = "\r")
+  aic <- function(by) {
+    key <- cells(by)
+    inside <- big(key)
+    p <- ifelse(inside, share(key), overall)
+    used <- c(key[inside], coarse[!inside])
+    -2 * sum(weight * log(p)) + 2 * sum(tapply(c(fine[inside], fine[!inside]), used, function(v) length(unique(v)) - 1))
+  }
+  by <- character()
+  best <- aic(by)
+  repeat {
+    candidates <- setdiff(strata, by)
+    if (!length(candidates)) break
+    scores <- vapply(candidates, function(g) aic(c(by, g)), 0)
+    if (min(scores) >= best) break
+    by <- c(by, candidates[which.min(scores)])
+    best <- min(scores)
+  }
+  key <- cells(by)
+  inside <- big(key)
+  list(by = by, coarse = lapply(split(fine, coarse), table), cells = if (length(by)) lapply(split(fine[inside], key[inside]), table))
+}
+
+draw_within <- function(w, coarse, X, groups) {
+  key <- paste(coarse, if (length(w$by)) do.call(paste, c(as.data.frame(X[, groups %in% w$by, drop = FALSE]), sep = " ")), sep = "\r")
+  out <- character(length(coarse))
+  for (k in unique(key)) {
+    i <- which(key == k)
+    t <- w$cells[[k]] %||% w$coarse[[coarse[i[1]]]]
+    out[i] <- names(t)[sample.int(length(t), length(i), replace = TRUE, prob = t)]
+  }
+  out
+}
+
 # Values on a grid coarser than their decimals (whole mg/dL converted to mmol/L: glucose
 # 0.05551 apart) as origin and step, so drawn values stay conversions of whole numbers.
 value_grid <- function(v) {
@@ -186,70 +231,106 @@ node_parts <- function(ds, variable, frame, previous) {
 # type is chosen once per test, so first and later records share a scale: categories for
 # text and numbers with few values, otherwise numbers (on their normal scores, with the
 # source's percentiles of the test). A trajectory's first record is fitted without the arm (it is measured before
-# treatment); later records add the previous recorded value. A category also keeps its
-# implications (see spine.R).
+# treatment); later records add the previous recorded value, and a number also the mean of
+# the earlier ones (so it returns to the subject's level instead of drifting like a random
+# walk). A category also keeps its implications (see spine.R).
 fit_node <- function(ds, variable, frame, arm) {
   node <- ds$nodes[[variable]]
   s <- ds$structure
   level <- if (ds$name == "DM") "record" else ds$levels[[variable]]
   frame <- frame[level_rows(frame, level, s), , drop = FALSE]
   y <- frame[[variable]]
-  previous <- rep(NA_real_, nrow(frame))
+  previous <- earlier <- rep(NA_real_, nrow(frame))
   if (isTRUE(node$prev)) {
     series <- group_index(frame, c("USUBJID", setdiff(s$keys, s$visit)))
     o <- order(series, as.numeric(frame[[s$visit]]))
     last <- c(0, cummax(ifelse(is.na(y[o]), 0, seq_along(o))))[seq_along(o)]
     follows <- last > 0 & series[o][pmax(last, 1)] == series[o]
     previous[o[follows]] <- y[o][last[follows]]
+    x <- parse_number(y[o])
+    seen <- !is.na(x)
+    sums <- stats::ave(ifelse(seen, x, 0), series[o], FUN = cumsum) - ifelse(seen, x, 0)
+    counts <- stats::ave(as.numeric(seen), series[o], FUN = cumsum) - seen
+    earlier[o] <- ifelse(counts > 0, sums / counts, NA)
   }
   parts <- node_parts(ds, variable, frame, previous)
+  # Text that reads as a number in every record of a test (VSORRES "58.0") is modelled as
+  # that number and written back in the source's format.
+  numbers <- parse_number(y)
+  by_test <- split(seq_along(y), parts$scale)
+  as_number <- vapply(by_test, function(i) is.numeric(y) || all(!is.na(numbers[i][!is.na(y[i])])), TRUE)
+  value <- function(i) if (as_number[match(parts$scale[i[1]], names(by_test))]) numbers[i] else y[i]
   arm <- c(arm, paste0("DM.", arm))
   predictors <- intersect(node$predictors, names(frame))
   tree <- node$model == "tree"
   model <- if (tree) "auto" else node$model
   coarse <- coarse_values(ds, variable, y, frame)
-  types <- vapply(split(y, parts$scale), function(v) {
+  types <- vapply(by_test, function(i) {
+    v <- value(i)
     v <- v[!is.na(v)]
     if (!is.numeric(v) || model == "categories" || (model == "auto" && length(unique(v)) <= MAX_DISCRETE_VALUES) || length(unique(v)) < 2)
       "categories" else "number"
   }, "")
-  margins <- lapply(split(y, parts$scale), function(v) if (is.numeric(v)) stats::quantile(v, NUMBER_QUANTILES, na.rm = TRUE, names = FALSE))
+  margins <- lapply(by_test, function(i) { v <- value(i); if (is.numeric(v)) stats::quantile(v, NUMBER_QUANTILES, na.rm = TRUE, names = FALSE) })
   fits <- lapply(split(seq_along(y), parts$key), function(i) {
     follow <- grepl("|follow", parts$key[i[1]], fixed = TRUE)
     type <- unname(types[match(parts$scale[i[1]], names(types))])
     margin <- if (type == "number" && !tree) margins[[match(parts$scale[i[1]], names(margins))]]
     records <- frame[i, , drop = FALSE]
-    records$.previous <- if (is.null(margin)) previous[i] else normal_score(margin, previous[i])
-    used <- if (follow) c(predictors, ".previous") else if (isTRUE(node$prev)) setdiff(predictors, arm) else predictors
-    if (tree) return(fit_tree(y[i], records, used, type == "categories"))
+    records$.previous <- if (!is.null(margin)) normal_score(margin, parse_number(previous[i])) else if (type == "number") parse_number(previous[i]) else previous[i]
+    records$.earlier <- if (!is.null(margin)) normal_score(margin, earlier[i]) else earlier[i]
+    used <- if (follow) c(predictors, ".previous", if (type == "number") ".earlier") else if (isTRUE(node$prev)) setdiff(predictors, arm) else predictors
+    text <- if (type == "number" && is.character(y)) number_format(y[i])
+    if (tree) return(c(fit_tree(if (type == "number") value(i) else y[i], records, used, type == "categories"), list(text = text)))
     info <- design_info(records, used, c("VISITNUM", s$test))
-    if (type == "categories") return(c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i], isTRUE(node$vary)), list(info = info)))
-    v <- y[i][!is.na(y[i])]
-    c(fit_part(normal_score(margin, y[i]), design_matrix(info, records), type, design_groups(info)),
-      list(info = info, margin = margin, digits = decimals(v), grid = value_grid(v)))
+    if (type == "categories") return(c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i], isTRUE(node$vary),
+      names(Filter(function(p) p$type == "categorical", info)), records$USUBJID), list(info = info)))
+    v <- value(i)
+    v <- v[!is.na(v)]
+    c(fit_part(normal_score(margin, value(i)), design_matrix(info, records), type, design_groups(info)),
+      list(info = info, margin = margin, digits = decimals(v), grid = value_grid(v), text = text))
   })
   # Implications are found within a test: the last visit gives PROTOCOL COMPLETED to the
-  # disposition event, not to the subject's other DS records.
-  implications <- if (all(types == "categories")) {
-    keys <- implication_keys(ds, frame)
-    if (ds$name != "DM" && level == "subject") keys <- keys[!record_feature(keys)]
-    do.call(rbind, lapply(split(seq_along(y), parts$scale), function(i) {
-      out <- rbind(fit_implications(y[i], frame[i, , drop = FALSE], keys), derived_implications(ds, variable, y[i], frame[i, , drop = FALSE], keys))
-      if (!NROW(out)) return(NULL)
-      within <- length(unique(parts$scale)) > 1
-      out$within <- if (within) s$test else NA_character_
-      out$part <- if (within) parts$scale[i[1]] else NA_character_
-      out
-    }))
-  }
+  # disposition event, not to the subject's other DS records. A number keeps those of its
+  # missing value (no result where the test was NOT DONE).
+  keys <- implication_keys(ds, frame)
+  if (ds$name != "DM" && level == "subject") keys <- keys[!record_feature(keys)]
+  implications <- do.call(rbind, lapply(by_test, function(i) {
+    out <- if (types[match(parts$scale[i[1]], names(types))] == "categories")
+      rbind(fit_implications(y[i], frame[i, , drop = FALSE], keys), derived_implications(ds, variable, y[i], frame[i, , drop = FALSE], keys)) else {
+      out <- fit_implications(ifelse(is.na(y[i]), NA, "recorded"), frame[i, , drop = FALSE], keys)
+      if (NROW(out)) out[vapply(out$value, identical, TRUE, MISSING), , drop = FALSE]
+    }
+    if (!NROW(out)) return(NULL)
+    within <- length(unique(parts$scale)) > 1
+    out$within <- if (within) s$test else NA_character_
+    out$part <- if (within) parts$scale[i[1]] else NA_character_
+    out
+  }))
   reduced <- sum(vapply(fits, function(p) p$type != "tree" && length(p$columns) < length(design_groups(p$info)), TRUE))
   description <- sprintf("%s%s%s, %d %s%s%s", if (tree) sprintf("trees (%s leaves)", paste(range(vapply(fits, `[[`, 0L, "leaves")), collapse = "-"))
     else paste(sort(unique(types)), collapse = "/"),
     if (length(unique(parts$scale)) > 1) paste(" per", s$test) else "",
-    if (isTRUE(node$prev)) " with previous value" else "", nrow(frame), if (level == "record") "records" else paste(level, "rows"),
+    if (isTRUE(node$prev)) " with previous values" else "", nrow(frame), if (level == "record") "records" else paste(level, "rows"),
     if (reduced) sprintf(", fewer predictors in %d of %d parts (few values)", reduced, length(fits)) else "",
     if (NROW(implications)) sprintf(", %d implication%s", nrow(implications), if (nrow(implications) > 1) "s" else "") else "")
   list(parts = fits, arm = arm, description = description, implications = implications)
+}
+
+# How a number was written: the decimals every value has (VSORRES "58.0"), or NA when they
+# vary, for the shortest form.
+number_format <- function(v) {
+  v <- v[!is.na(v)]
+  written <- nchar(sub("^[^.]*\\.?", "", v))
+  if (length(unique(written)) == 1) written[1] else NA_integer_
+}
+
+number_text <- function(x, fixed, digits) {
+  x <- round(x, if (is.na(fixed)) digits else fixed)
+  x[!is.na(x) & x == 0] <- 0
+  out <- if (is.na(fixed)) formatC(x, format = "f", digits = digits, drop0trailing = TRUE) else formatC(x, format = "f", digits = fixed)
+  out[is.na(x)] <- NA
+  out
 }
 
 # The values of the coarsest useful category derived from a node by an accepted lookup on
@@ -398,23 +479,25 @@ softmax_draw <- function(eta) {
   pmin(1L + rowSums(cumulative < stats::runif(nrow(p)) * rowSums(p)), ncol(p))
 }
 
-draw_records <- function(ds, variable, fit, frame, previous) {
+draw_records <- function(ds, variable, fit, frame, previous, earlier = rep(NA_real_, length(previous))) {
   parts <- node_parts(ds, variable, frame, previous)
   values <- rep(NA, nrow(frame))
   for (key in intersect(unique(parts$key), names(fit$parts))) {
     p <- fit$parts[[key]]
     i <- which(parts$key == key)
     records <- frame[i, , drop = FALSE]
-    records$.previous <- if (is.null(p$margin)) previous[i] else normal_score(p$margin, previous[i])
+    records$.previous <- if (!is.null(p$margin)) normal_score(p$margin, parse_number(previous[i])) else if (!is.null(p$text)) parse_number(previous[i]) else previous[i]
+    records$.earlier <- if (!is.null(p$margin)) normal_score(p$margin, earlier[i]) else earlier[i]
     if (p$type == "tree") {
-      values[i] <- draw_tree(p, records)
+      drawn <- draw_tree(p, records)
+      values[i] <- if (is.null(p$text)) drawn else number_text(drawn, p$text, p$digits)
       next
     }
     X <- design_matrix(p$info, records)[, p$columns, drop = FALSE]
     eta <- X %*% t(p$coef)
     if (p$type == "categories") {
       drawn <- p$levels[softmax_draw(eta)]
-      if (!is.null(p$within)) drawn <- vapply(drawn, function(g) { w <- p$within[[g]]; names(w)[sample.int(length(w), 1, prob = w)] }, "")
+      if (!is.null(p$within)) drawn <- draw_within(p$within, drawn, design_matrix(p$info, records), design_groups(p$info))
       drawn[drawn == MISSING] <- NA
       if (p$numeric) drawn <- as.numeric(drawn)
     } else {
@@ -423,6 +506,7 @@ draw_records <- function(ds, variable, fit, frame, previous) {
       if (!is.null(p$grid)) drawn <- p$grid[1] + round((drawn - p$grid[1]) / p$grid[2]) * p$grid[2]
       drawn <- round(drawn, p$digits)
       if (!is.null(p$recorded)) drawn[softmax_draw(X %*% t(p$recorded$coef)) == 2] <- NA
+      if (!is.null(p$text)) drawn <- number_text(drawn, p$text, p$digits)
     }
     values[i] <- drawn
   }
@@ -449,10 +533,17 @@ draw_node <- function(ds, variable, fit, frame) {
     rep(1, nrow(part))
   values <- rep(NA, nrow(part))
   last <- rep(NA_real_, max(0, series))
+  sums <- counts <- rep(0, max(0, series))
   for (r in sort(unique(rank))) {
     i <- which(rank == r)
-    values[i] <- draw_records(ds, variable, fit, part[i, , drop = FALSE], if (isTRUE(node$prev)) last[series[i]] else rep(NA, length(i)))
-    if (isTRUE(node$prev)) last[series[i][!is.na(values[i])]] <- values[i][!is.na(values[i])]
+    values[i] <- draw_records(ds, variable, fit, part[i, , drop = FALSE], if (isTRUE(node$prev)) last[series[i]] else rep(NA, length(i)),
+      ifelse(counts[series[i]] > 0, sums[series[i]] / counts[series[i]], NA))
+    if (isTRUE(node$prev)) {
+      last[series[i][!is.na(values[i])]] <- values[i][!is.na(values[i])]
+      x <- parse_number(values[i])
+      sums[series[i]] <- sums[series[i]] + ifelse(is.na(x), 0, x)
+      counts[series[i]] <- counts[series[i]] + !is.na(x)
+    }
   }
   values <- apply_implications(fit$implications, values, part,
     function(i) draw_records(ds, variable, fit, part[i, , drop = FALSE], rep(NA, length(i))))

@@ -113,8 +113,18 @@ new_dataset <- function(study, name) {
   if (!is.null(structure$series)) levels[constant_within(c("USUBJID", structure$series))] <- "series"
   levels[name == "DM" | constant_within("USUBJID")] <- "subject"
   kinds <- vapply(x, value_kind, "")
+  # A whole number that no subject repeats names the record (--SEQ, also when numbered in
+  # blocks: QS's 1001, 1002, 3001): it is copied with the record. Its values recur across
+  # subjects and most records are in subjects with several, so it is not unique merely
+  # because subjects have one record.
+  several <- mean(tabulate(subjects)[subjects] > 1) >= 0.5
+  structure$id <- if (name != "DM" && several) Filter(function(v) {
+    w <- x[[v]]
+    is.numeric(w) && !anyNA(w) && all(w == round(w)) && !anyDuplicated(data.frame(subjects, w)) &&
+      nrow(x) >= 2 * length(unique(w))
+  }, setdiff(variables, c("USUBJID", structure$keys)))
   # A sponsor identifier of a series numbers the subject's series: it is part of the spine.
-  spine_keys <- c(structure$keys, if (endsWith(structure$series %||% "", "SPID")) structure$series)
+  spine_keys <- c(structure$keys, structure$id, if (endsWith(structure$series %||% "", "SPID")) structure$series)
   structure$spine <- spine_columns(name, prefix, variables, kinds, spine_keys)
   node <- list(type = NA_character_, predictors = character(), model = default_node_model(), prev = FALSE, vary = FALSE)
   nodes <- setNames(rep(list(node), length(variables)), variables)
@@ -319,7 +329,7 @@ starting_graph <- function(study, ds, order = character()) {
     inputs <- intersect(ds$inputs, informative)
     if (!is_dm && level == 1) inputs <- inputs[!record_feature(inputs)]
     ds$nodes[[v]]$predictors <- unique(c(inputs, usable, if (level >= 2) s$visit, if (level == 4) intersect("VISITNUM", s$spine)))
-    ds$nodes[[v]]$prev <- !is.null(s$visit) && !is.null(s$test) && ds$levels[[v]] == "record" && kinds[[v]] == "numeric"
+    ds$nodes[[v]]$prev <- !is.null(s$visit) && !is.null(s$test) && ds$levels[[v]] == "record"
   }
   ds$order <- order
   ds
@@ -370,7 +380,7 @@ check_dataset <- function(study, name) {
 
 node_formula <- function(ds, variable, fit = NULL) {
   node <- ds$nodes[[variable]]
-  predictors <- c(display_name(node$predictors), if (isTRUE(node$prev)) "previous value")
+  predictors <- c(display_name(node$predictors), if (isTRUE(node$prev)) "previous values")
   by <- if (!is.null(ds$structure$test) && ds$levels[[variable]] == "record") paste(" | per", ds$structure$test)
   implications <- if (!is.null(fit$implications)) vapply(seq_len(nrow(fit$implications)), function(i) implication_label(fit$implications[i, ]), "")
   paste0(switch(node_type(ds, variable),

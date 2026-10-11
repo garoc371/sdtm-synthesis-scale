@@ -10,7 +10,7 @@ coherence_checks <- function(study, generated) {
     x <- data[[name]]
     frame <- dataset_frame(study, name, data)
     sequence <- names(Filter(function(r) r$op == "sequence", accepted_rules(ds)))
-    keys <- intersect(c("USUBJID", if (isTRUE(ds$structure$unique)) ds$structure$keys else sequence[1]), names(x))
+    keys <- intersect(c("USUBJID", if (isTRUE(ds$structure$unique)) ds$structure$keys else c(ds$structure$id, sequence)[1]), names(x))
     starts <- grep("STDTC$", names(x), value = TRUE)
     ends <- sub("STDTC$", "ENDTC", starts)
     subjects <- unique(x$USUBJID)
