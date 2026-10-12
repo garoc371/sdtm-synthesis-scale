@@ -205,10 +205,11 @@ known_date_names <- function(ds) if (length(ds$known_dates)) paste0("T.", ds$kno
 # ---- Implications ----------------------------------------------------------------------
 
 # A sampled category may be tied to a spine feature, a DM variable or a spine column of its own
-# record in a way no model with few records keeps: a value of the key that always comes with
-# one value of the node (a DS date on the death date: DEATH), or a value of the node that only
-# comes with some values of the key (DEATH only on the death date; a related adverse event only
-# during or after treatment). Each is kept when it holds on every source record, in at least two
+# record (not its sequence number, which only counts the subject's records) in a way no model
+# with few records keeps: a value of the key that always comes with one value of the node (a
+# DS date on the death date: DEATH), or a value of the node that only comes with some values
+# of the key (DEATH only on the death date; a related adverse event only during or after
+# treatment). Each is kept when it holds on every source record, in at least two
 # subjects, and would hold by chance with probability below IMPLICATION_P if the two were
 # independent. Subjects count, not records (records of a subject are alike): a share is
 # the mean over subjects of the share of their records. Generation redraws the second and
@@ -219,7 +220,7 @@ IMPLICATION_KEY_VALUES <- 50
 implication_keys <- function(ds, frame) {
   candidates <- c(grep("^T\\.", names(frame), value = TRUE), if (ds$name != "DM") grep("^DM\\.", names(frame), value = TRUE),
     names(frame)[subject_result_column(names(frame))], grep("^LINK\\.", names(frame), value = TRUE),
-    intersect(ds$structure$spine, names(frame)))
+    intersect(setdiff(ds$structure$spine, ds$structure$id), names(frame)))
   Filter(function(k) (is.character(frame[[k]]) || k %in% ds$structure$spine && is.numeric(frame[[k]])) &&
     length(unique(frame[[k]])) %in% 2:IMPLICATION_KEY_VALUES, candidates)
 }
