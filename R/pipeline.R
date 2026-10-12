@@ -198,13 +198,16 @@ set_sample <- function(b, n, seed) {
 
 # What a worker needs for one dataset: its records, DM's and SV's (the spine features), the
 # subjects and categories of other datasets for their record counts and T.<DATASET>.<CATEGORY>,
-# the tests and results behind their subject results, and DM's graph for the arm.
+# the tests and results behind their subject results, the link ids, visits and columns of
+# the records its link ids point to, and DM's graph for the arm.
 job_study <- function(study, name) {
   keep <- c("DM", VISIT_HUB, name)
   earlier <- earlier_datasets(study, name)
   s <- study[c("source", "datasets")]
   other <- setdiff(names(s$source$data), keep)
-  s$source$data[other] <- lapply(other, function(d) { x <- s$source$data[[d]]; x[intersect(c("USUBJID", paste0(d, "CAT"), unlist(s$datasets[[d]]$subject_results[c("test", "result")])), names(x))] })
+  link <- s$datasets[[name]]$link
+  s$source$data[other] <- lapply(other, function(d) { x <- s$source$data[[d]]; x[intersect(c("USUBJID", paste0(d, "CAT"), unlist(s$datasets[[d]]$subject_results[c("test", "result")]),
+    if (identical(d, link$dataset)) c(link$by, link$visit, link$columns)), names(x))] })
   s$datasets <- s$datasets[intersect(names(s$datasets), union(keep, earlier))]
   s$datasets[setdiff(names(s$datasets), keep)] <- lapply(s$datasets[setdiff(names(s$datasets), keep)], function(ds) ds[c("include", "subject_results")])
   s$fits <- list()

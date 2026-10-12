@@ -29,10 +29,36 @@ domain_class <- function(name, x) {
 }
 
 # Datasets in class order (CLASSES), then by name: DM first, as every other dataset's subjects
-# and inputs come from it. The order only decides which record counts (N.*) a dataset may use.
+# and inputs come from it. The order decides which record counts (N.*) a dataset may use; a
+# dataset also comes after the one its link id points to, whose records it reads.
 order_datasets <- function(data) {
   class <- mapply(domain_class, names(data), data)
-  names(data)[order(match(class, names(CLASSES)), names(data))]
+  ordered <- names(data)[order(match(class, names(CLASSES)), names(data))]
+  out <- character()
+  for (name in ordered) {
+    chain <- name
+    while (!is.null(to <- dataset_link(data, chain[1])$dataset) && !to %in% c(out, chain)) chain <- c(to, chain)
+    out <- union(out, chain)
+  }
+  out
+}
+
+# SDTMIG: --LNKID links a record to a record of another dataset (TRLNKID to the lesion TU
+# identifies). The other dataset is the one whose own --LNKID names one record of the subject
+# and holds most of the dataset's link ids.
+dataset_link <- function(data, name) {
+  x <- data[[name]]
+  key <- paste0(domain_prefix(name, x), "LNKID")
+  if (is.null(x[[key]])) return(NULL)
+  ids <- paste(x$USUBJID, x[[key]])[!is.na(x[[key]])]
+  for (d in setdiff(names(data), name)) {
+    y <- data[[d]]
+    by <- paste0(domain_prefix(d, y), "LNKID")
+    if (is.null(y[[by]]) || is.null(y$USUBJID)) next
+    own <- paste(y$USUBJID, y[[by]])[!is.na(y[[by]])]
+    if (!anyDuplicated(own) && mean(ids %in% own) > 0.5) return(list(dataset = d, key = key, by = by))
+  }
+  NULL
 }
 
 # The source as the study uses it: SUPP-- datasets folded into their parents, datasets

@@ -126,12 +126,25 @@ new_dataset <- function(study, name) {
   # A sponsor identifier of a series numbers the subject's series: it is part of the spine.
   spine_keys <- c(structure$keys, structure$id, if (endsWith(structure$series %||% "", "SPID")) structure$series)
   structure$spine <- spine_columns(name, prefix, variables, kinds, spine_keys)
+  # A record linked to a record of an earlier dataset (TR to its TU lesion) sees that record's
+  # spine and category columns in words as LINK.<VAR> (LINK.TULOC) when both were collected
+  # at the same visit (the lesion's measurements where it was identified); later records follow
+  # their previous values. Link ids and visits are spine columns, so generated records link as
+  # their donor's do.
+  link <- dataset_link(study$source$data, name)
+  to <- study$datasets[[link$dataset %||% ""]]
+  link <- if (!is.null(to) && link$key %in% structure$spine && link$by %in% to$structure$spine) {
+    y <- study$source$data[[link$dataset]]
+    columns <- Filter(function(v) is.character(y[[v]]) && length(unique(stats::na.omit(y[[v]]))) %in% 2:MAX_DEFAULT_LEVELS,
+      setdiff(c(to$structure$spine, intersect(paste0(to$prefix, c("CAT", "SCAT")), to$variables)), c("USUBJID", link$by)))
+    if (length(columns)) c(link, list(columns = columns, visit = intersect("VISITNUM", intersect(structure$spine, to$structure$spine))))
+  }
   node <- list(type = NA_character_, predictors = character(), model = default_node_model(), prev = FALSE, vary = FALSE)
   nodes <- setNames(rep(list(node), length(variables)), variables)
   for (v in structure$spine) nodes[[v]]$type <- "key"
   if ("USUBJID" %in% variables) nodes$USUBJID$type <- if (name == "DM") "identifier" else "key"
   list(name = name, prefix = prefix, class = domain_class(name, x), variables = variables,
-    labels = study$source$labels[[name]], structure = structure,
+    labels = study$source$labels[[name]], structure = structure, link = link,
     levels = setNames(levels, variables), kinds = kinds, inputs = character(), rules = list(),
     known_dates = if (name != "DM") known_dates(x, variables[kinds[variables] == "date"]),
     subject_results = subject_results(x, prefix, structure$test), nodes = nodes, order = character(), include = TRUE, fixed = fixed)
@@ -169,19 +182,20 @@ subject_result_names <- function(study, datasets) unlist(lapply(datasets, functi
 }))
 
 # Columns holding results of earlier datasets (RS.NEWLPROG): a dataset name and a test.
-subject_result_column <- function(x) grepl("^[A-Z][A-Z0-9]*[.][^.]+$", x) & !grepl("^(DM|N|T|SERIES)[.]", x)
+subject_result_column <- function(x) grepl("^[A-Z][A-Z0-9]*[.][^.]+$", x) & !grepl("^(DM|N|T|SERIES|LINK)[.]", x)
 
 # ---- Frames ---------------------------------------------------------------------------
 
 # A dataset's records with every DM variable joined as DM.<VAR>, record counts of earlier
-# datasets as N.<DATASET>, their subject results as <DATASET>.<TEST> (see `subject_results()`)
-# and the spine features T.* (see spine.R). DM's frame has the
+# datasets as N.<DATASET>, their subject results as <DATASET>.<TEST> (see `subject_results()`),
+# the linked record's columns as LINK.<VAR> and the spine features T.* (see spine.R). DM's frame has the
 # subject-level spine features. The record structure travels as an attribute.
 dataset_frame <- function(study, name, data = study$source$data) {
   x <- data[[name]]
   if (name == "DM") x <- cbind(x[!startsWith(names(x), "T.")], spine_subjects(data, x$USUBJID)) else {
     subjects <- subject_inputs(study, data, name)
     x <- cbind(x, subjects[match(x$USUBJID, subjects$USUBJID), -1, drop = FALSE])
+    x <- link_inputs(x, study$datasets[[name]]$link, data)
     x <- spine_record_features(x, study$datasets[[name]])
     if (identical(study$datasets[[name]]$structure$type, "series")) x <- series_frame(x, study$datasets[[name]]$structure)
   }
@@ -189,6 +203,23 @@ dataset_frame <- function(study, name, data = study$source$data) {
   attr(x, "structure") <- study$datasets[[name]]$structure
   x
 }
+
+# The columns of the record each record's link id points to, at that record's visit; a
+# column the linked dataset does not generate is missing.
+link_inputs <- function(x, link, data) {
+  if (is.null(link)) return(x)
+  y <- data[[link$dataset]]
+  i <- match(paste(x$USUBJID, x[[link$key]]), paste(y$USUBJID, y[[link$by]]))
+  i[is.na(x[[link$key]])] <- NA
+  for (v in link$visit) {
+    same <- as.numeric(x[[v]]) == as.numeric(y[[v]][i])
+    i[is.na(same) | !same] <- NA
+  }
+  for (v in link$columns) x[[paste0("LINK.", v)]] <- if (is.null(y[[v]])) rep(NA_character_, nrow(x)) else as.character(y[[v]])[i]
+  x
+}
+
+link_input_names <- function(ds) if (length(ds$link$columns)) paste0("LINK.", ds$link$columns)
 
 # A series' records carry whether it is still recorded at the subject's last collection in
 # the dataset (SERIES.ONGOING): a series-level input, as an event still ongoing at the end.
@@ -237,12 +268,13 @@ input_choices <- function(study, name) {
   generated <- variables_of_type(study$datasets$DM, c("key", "rule", "sampled", "identifier"))
   counts <- included_earlier(study, name)
   c(paste0("DM.", setdiff(generated, "USUBJID")), if (length(counts)) paste0("N.", counts), subject_result_names(study, counts),
-    spine_feature_names(study, name),
+    spine_feature_names(study, name), link_input_names(study$datasets[[name]]),
     if (identical(study$datasets[[name]]$structure$type, "series")) SERIES_INPUTS)
 }
 
-# Spine features of the record (T.PHASE, T.<D>=<M>, T.<D>.KNOWN), as opposed to the subject's.
-record_feature <- function(x) x == "T.PHASE" | startsWith(x, "T.") & (grepl("=", x, fixed = TRUE) | endsWith(x, ".KNOWN"))
+# Inputs of the record (T.PHASE, T.<D>=<M>, T.<D>.KNOWN, LINK.*), as opposed to the subject's.
+record_feature <- function(x) x == "T.PHASE" | startsWith(x, "T.") & (grepl("=", x, fixed = TRUE) | endsWith(x, ".KNOWN")) |
+  startsWith(x, "LINK.")
 
 # ---- Rules and node types --------------------------------------------------------------
 
@@ -262,11 +294,11 @@ discover_dataset <- function(study, name) {
 # Rules are searched among the dataset's own variables, DM's and the spine features of the
 # subject and record phase. Record counts of other datasets (N.*) would add one candidate
 # key per earlier dataset, so the search would grow with the square of the number of
-# datasets; so would the date indicators T.<D>=<M>.
+# datasets; so would the date indicators T.<D>=<M>. The linked record's columns (LINK.*) are inputs only.
 discovery_frame <- function(study, name) {
   frame <- dataset_frame(study, name)
   structure <- attr(frame, "structure")
-  frame <- frame[!grepl("^N\\.|^SERIES\\.|^\\.series$|^T\\..*=", names(frame)) & !subject_result_column(names(frame))]
+  frame <- frame[!grepl("^N\\.|^SERIES\\.|^LINK\\.|^\\.series$|^T\\..*=", names(frame)) & !subject_result_column(names(frame))]
   attr(frame, "structure") <- structure
   frame
 }
@@ -350,7 +382,7 @@ generation_order <- function(ds) {
 # arm and characteristics follow the timing the subject copied (a screen failure is never
 # treated); the arm is not a predictor of baseline values. Other datasets' inputs are the
 # treatment, the subject's death and last visit, the record's phase and which of its dates
-# it has. A subject-level node also uses the subject results of earlier datasets (the study
+# it has and the record it links to. A subject-level node also uses the subject results of earlier datasets (the study
 # eye with the new-lesion assessment). A record-level node also uses the visit the record was
 # copied at (a DS term at the retrieval visit).
 starting_graph <- function(study, ds, order = character()) {
@@ -360,7 +392,7 @@ starting_graph <- function(study, ds, order = character()) {
   order <- unique(c(intersect(order, sampled), sampled))
   choices <- input_choices(study, ds$name)
   if (!length(ds$inputs)) ds$inputs <- intersect(if (is_dm) SPINE_SUBJECT_FEATURES else
-    c(paste0("DM.", arm), "T.DIED", "T.LASTVISIT", "T.PHASE", known_date_names(ds), SERIES_INPUTS), choices)
+    c(paste0("DM.", arm), "T.DIED", "T.LASTVISIT", "T.PHASE", known_date_names(ds), SERIES_INPUTS, link_input_names(ds)), choices)
   frame <- dataset_frame(study, ds$name)
   subject <- if (!is_dm) subject_result_names(study, included_earlier(study, ds$name))
   kinds <- vapply(frame, value_kind, "")
