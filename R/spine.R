@@ -218,6 +218,7 @@ IMPLICATION_KEY_VALUES <- 50
 
 implication_keys <- function(ds, frame) {
   candidates <- c(grep("^T\\.", names(frame), value = TRUE), if (ds$name != "DM") grep("^DM\\.", names(frame), value = TRUE),
+    names(frame)[subject_result_column(names(frame))],
     intersect(ds$structure$spine, names(frame)))
   Filter(function(k) (is.character(frame[[k]]) || k %in% ds$structure$spine && is.numeric(frame[[k]])) &&
     length(unique(frame[[k]])) %in% 2:IMPLICATION_KEY_VALUES, candidates)

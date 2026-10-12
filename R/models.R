@@ -233,7 +233,8 @@ node_parts <- function(ds, variable, frame, previous) {
 # source's percentiles of the test). A trajectory's first record is fitted without the arm (it is measured before
 # treatment); later records add the previous recorded value, and a number also the mean of
 # the earlier ones (so it returns to the subject's level instead of drifting like a random
-# walk). A category also keeps its implications (see spine.R).
+# walk). A category also keeps its implications (see spine.R), and one value per subject in a
+# test where each subject has one, however many records of it they have.
 fit_node <- function(ds, variable, frame, arm) {
   node <- ds$nodes[[variable]]
   s <- ds$structure
@@ -314,7 +315,8 @@ fit_node <- function(ds, variable, frame, arm) {
     if (isTRUE(node$prev)) " with previous values" else "", nrow(frame), if (level == "record") "records" else paste(level, "rows"),
     if (reduced) sprintf(", fewer predictors in %d of %d parts (few values)", reduced, length(fits)) else "",
     if (NROW(implications)) sprintf(", %d implication%s", nrow(implications), if (nrow(implications) > 1) "s" else "") else "")
-  list(parts = fits, arm = arm, description = description, implications = implications)
+  list(parts = fits, arm = arm, description = description, implications = implications,
+    constant = if (level == "record" && !is.null(s$test)) intersect(constant_tests(frame, s$test, variable), names(types)[types == "categories"]))
 }
 
 # How a number was written: the decimals every value has (VSORRES "58.0"), or NA when they
@@ -547,6 +549,11 @@ draw_node <- function(ds, variable, fit, frame) {
   }
   values <- apply_implications(fit$implications, values, part,
     function(i) draw_records(ds, variable, fit, part[i, , drop = FALSE], rep(NA, length(i))))
+  if (length(fit$constant)) {
+    key <- paste(part$USUBJID, part[[s$test]], sep = "\r")
+    once <- format_value(part[[s$test]]) %in% fit$constant
+    values[once] <- values[match(key, key)][once]
+  }
   if (level == "record") return(values)
   key <- level_key(level, s)
   values[match(key_strings(frame[key]), key_strings(part[key]))]

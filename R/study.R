@@ -81,8 +81,8 @@ new_dataset <- function(study, name) {
     keys <- c(keys, determined)
     structure <- list(type = "schedule", keys = keys, visit = visit, test = test, unique = unique_share(keys) == 1)
   }
-  # Subject-level variables are constant within subject, visit-level within subject and visit,
-  # series-level within a series.
+  # Subject-level variables are constant within subject (every variable, when subjects have one
+  # record), visit-level within subject and visit, series-level within a series.
   constant_within <- function(columns) {
     group <- group_index(x, columns)
     repeated <- tabulate(group) > 1
@@ -111,7 +111,7 @@ new_dataset <- function(study, name) {
   levels <- rep("record", length(variables))
   if (!is.null(structure$visit)) levels[constant_within(c("USUBJID", structure$visit))] <- "visit"
   if (!is.null(structure$series)) levels[constant_within(c("USUBJID", structure$series))] <- "series"
-  levels[name == "DM" | constant_within("USUBJID")] <- "subject"
+  levels[name == "DM" | constant_within("USUBJID") | !anyDuplicated(x$USUBJID)] <- "subject"
   kinds <- vapply(x, value_kind, "")
   # A whole number that no subject repeats names the record (--SEQ, also when numbered in
   # blocks: QS's 1001, 1002, 3001): it is copied with the record. Its values recur across
@@ -134,17 +134,48 @@ new_dataset <- function(study, name) {
     labels = study$source$labels[[name]], structure = structure,
     levels = setNames(levels, variables), kinds = kinds, inputs = character(), rules = list(),
     known_dates = if (name != "DM") known_dates(x, variables[kinds[variables] == "date"]),
-    nodes = nodes, order = character(), include = TRUE, fixed = fixed)
+    subject_results = subject_results(x, prefix, structure$test), nodes = nodes, order = character(), include = TRUE, fixed = fixed)
 }
 
 VISIT_HUB <- "SV"
 
 main_date <- function(prefix, columns) intersect(paste0(prefix, c("STDTC", "DTC")), columns)[1]
 
+# Tests whose value of `v` each subject has once, however many records of the test they have
+# (a new-lesion assessment read by several radiologists).
+constant_tests <- function(x, test, v) {
+  key <- paste(x$USUBJID, x[[test]], sep = "\r")
+  values <- tapply(level_string(x[[v]]), key, function(z) length(unique(z)))
+  tests <- tapply(format_value(x[[test]]), key, `[`, 1)
+  names(which(tapply(values == 1, tests, all)))
+}
+
+# Results that describe the subject: tests with one result per subject, in words (not numbers)
+# with 2 to IMPLICATION_KEY_VALUES values. Later datasets see them as <DATASET>.<TEST>.
+subject_results <- function(x, prefix, test) {
+  result <- intersect(paste0(prefix, c("STRESC", "ORRES")), names(x))[1]
+  if (is.null(test) || is.na(result) || !is.character(x[[result]])) return(NULL)
+  tests <- Filter(function(t) {
+    v <- x[[result]][format_value(x[[test]]) == t]
+    v <- v[!is.na(v)]
+    length(unique(v)) %in% 2:IMPLICATION_KEY_VALUES && all(is.na(parse_number(v)))
+  }, constant_tests(x, test, result))
+  if (length(tests)) list(test = test, result = result, tests = tests)
+}
+
+subject_result_names <- function(study, datasets) unlist(lapply(datasets, function(d) {
+  r <- study$datasets[[d]]$subject_results
+  if (length(r$tests)) paste0(d, ".", r$tests)
+}))
+
+# Columns holding results of earlier datasets (RS.NEWLPROG): a dataset name and a test.
+subject_result_column <- function(x) grepl("^[A-Z][A-Z0-9]*[.][^.]+$", x) & !grepl("^(DM|N|T|SERIES)[.]", x)
+
 # ---- Frames ---------------------------------------------------------------------------
 
 # A dataset's records with every DM variable joined as DM.<VAR>, record counts of earlier
-# datasets as N.<DATASET> and the spine features T.* (see spine.R). DM's frame has the
+# datasets as N.<DATASET>, their subject results as <DATASET>.<TEST> (see `subject_results()`)
+# and the spine features T.* (see spine.R). DM's frame has the
 # subject-level spine features. The record structure travels as an attribute.
 dataset_frame <- function(study, name, data = study$source$data) {
   x <- data[[name]]
@@ -178,6 +209,15 @@ subject_inputs <- function(study, data, name) {
   for (v in setdiff(names(dm)[!startsWith(names(dm), "T.")], "USUBJID")) subjects[[paste0("DM.", v)]] <- dm[[v]]
   for (d in intersect(earlier_datasets(study, name), names(data)))
     subjects[[paste0("N.", d)]] <- as.numeric(tabulate(match(data[[d]]$USUBJID, dm$USUBJID), nrow(dm)))
+  for (d in included_earlier(study, name)) {
+    r <- study$datasets[[d]]$subject_results
+    x <- data[[d]]
+    for (t in r$tests) {
+      rows <- which(format_value(x[[r$test]]) == t)
+      subjects[[paste0(d, ".", t)]] <- if (is.null(x[[r$result]])) NA_character_ else
+        as.character(x[[r$result]][rows])[match(dm$USUBJID, x$USUBJID[rows])]
+    }
+  }
   cbind(subjects, spine_subjects(data, dm$USUBJID))
 }
 
@@ -187,12 +227,17 @@ earlier_datasets <- function(study, name) {
   setdiff(datasets[seq_len(match(name, datasets, nomatch = length(datasets) + 1) - 1)], "DM")
 }
 
+included_earlier <- function(study, name) {
+  earlier <- earlier_datasets(study, name)
+  earlier[vapply(study$datasets[earlier], `[[`, TRUE, "include")]
+}
+
 input_choices <- function(study, name) {
   if (name == "DM") return(spine_subject_names(study))
   generated <- variables_of_type(study$datasets$DM, c("key", "rule", "sampled", "identifier"))
-  earlier <- earlier_datasets(study, name)
-  counts <- earlier[vapply(study$datasets[earlier], `[[`, TRUE, "include")]
-  c(paste0("DM.", setdiff(generated, "USUBJID")), if (length(counts)) paste0("N.", counts), spine_feature_names(study, name),
+  counts <- included_earlier(study, name)
+  c(paste0("DM.", setdiff(generated, "USUBJID")), if (length(counts)) paste0("N.", counts), subject_result_names(study, counts),
+    spine_feature_names(study, name),
     if (identical(study$datasets[[name]]$structure$type, "series")) SERIES_INPUTS)
 }
 
@@ -221,7 +266,7 @@ discover_dataset <- function(study, name) {
 discovery_frame <- function(study, name) {
   frame <- dataset_frame(study, name)
   structure <- attr(frame, "structure")
-  frame <- frame[!grepl("^N\\.|^SERIES\\.|^\\.series$|^T\\..*=", names(frame))]
+  frame <- frame[!grepl("^N\\.|^SERIES\\.|^\\.series$|^T\\..*=", names(frame)) & !subject_result_column(names(frame))]
   attr(frame, "structure") <- structure
   frame
 }
@@ -305,8 +350,9 @@ generation_order <- function(ds) {
 # arm and characteristics follow the timing the subject copied (a screen failure is never
 # treated); the arm is not a predictor of baseline values. Other datasets' inputs are the
 # treatment, the subject's death and last visit, the record's phase and which of its dates
-# it has. A record-level node also uses the visit the record was copied at (a DS term at
-# the retrieval visit).
+# it has. A subject-level node also uses the subject results of earlier datasets (the study
+# eye with the new-lesion assessment). A record-level node also uses the visit the record was
+# copied at (a DS term at the retrieval visit).
 starting_graph <- function(study, ds, order = character()) {
   is_dm <- ds$name == "DM"
   arm <- if (is_dm) arm_variable(ds) else treatment_variable(study$datasets$DM)
@@ -316,6 +362,7 @@ starting_graph <- function(study, ds, order = character()) {
   if (!length(ds$inputs)) ds$inputs <- intersect(if (is_dm) SPINE_SUBJECT_FEATURES else
     c(paste0("DM.", arm), "T.DIED", "T.LASTVISIT", "T.PHASE", known_date_names(ds), SERIES_INPUTS), choices)
   frame <- dataset_frame(study, ds$name)
+  subject <- if (!is_dm) subject_result_names(study, included_earlier(study, ds$name))
   kinds <- vapply(frame, value_kind, "")
   few <- vapply(frame, function(v) length(unique(v)), 0L) <= MAX_DEFAULT_LEVELS
   informative <- names(frame)[kinds == "numeric" | (kinds != "date" & few)]
@@ -327,7 +374,7 @@ starting_graph <- function(study, ds, order = character()) {
     usable <- earlier[match(ds$levels[earlier], LEVELS) <= level & earlier %in% informative]
     if (is_dm) usable <- setdiff(usable, arm)
     inputs <- intersect(ds$inputs, informative)
-    if (!is_dm && level == 1) inputs <- inputs[!record_feature(inputs)]
+    if (!is_dm && level == 1) inputs <- c(inputs[!record_feature(inputs)], intersect(subject, informative))
     ds$nodes[[v]]$predictors <- unique(c(inputs, usable, if (level >= 2) s$visit, if (level == 4) intersect("VISITNUM", s$spine)))
     ds$nodes[[v]]$prev <- !is.null(s$visit) && !is.null(s$test) && ds$levels[[v]] == "record"
   }
