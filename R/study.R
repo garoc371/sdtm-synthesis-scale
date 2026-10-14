@@ -469,7 +469,8 @@ node_formula <- function(ds, variable, fit = NULL) {
     blank = "not generated",
     sampled = paste0(variable, " ~ ", if (length(predictors)) paste(predictors, collapse = " + ") else "1", by,
       if (!is.null(fit)) paste0(" · ", fit$description)),
-    "not set"), if (length(implications)) paste0(" · ", utils::head(implications, 3), collapse = ""),
+    "not set"), if (!is.null(group_rule(ds, variable))) paste0(" · ", rule_label(group_rule(ds, variable))),
+    if (length(implications)) paste0(" · ", utils::head(implications, 3), collapse = ""),
     if (length(implications) > 3) sprintf(" (+%d more)", length(implications) - 3))
 }
 

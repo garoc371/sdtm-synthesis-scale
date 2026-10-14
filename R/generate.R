@@ -43,8 +43,13 @@ generate_dataset <- function(study, name, built, spine) {
   frame <- frame[do.call(order, unname(lapply(frame[columns], function(v) if (is.character(v)) v else as.numeric(v)))), , drop = FALSE]
   ordered <- Filter(function(r) r$op %in% c("sequence", "record_flag"), accepted_rules(ds))
   frame[names(Filter(function(r) r$op == "sequence", ordered))] <- NULL
-  for (v in intersect(nodes, descendants(ds, names(ordered)))) if (node_type(ds, v) == "rule")
-    frame[[v]] <- RULE_OPS[[ds$rules[[v]]$op]]$apply(ds$rules[[v]], frame)
+  # Tests calculated from other records of their group replace what the variable's rule or
+  # model gave; rules reading a renumbered or recalculated variable are applied again.
+  calculated <- vapply(Filter(function(r) r$op == "group", accepted_rules(ds)), `[[`, "", "target")
+  for (v in intersect(nodes, descendants(ds, c(names(ordered), calculated)))) {
+    if (node_type(ds, v) == "rule") frame[[v]] <- rule_values(ds, ds$rules[[v]], frame) else
+      if (v %in% calculated) frame[[v]] <- RULE_OPS$group$apply(group_rule(ds, v), frame)
+  }
   for (v in setdiff(ds$variables, names(frame))) frame[[v]] <- switch(ds$kinds[[v]],
     date = as.Date(rep(NA, nrow(frame))), numeric = rep(NA_real_, nrow(frame)), rep(NA_character_, nrow(frame)))
   rownames(frame) <- NULL

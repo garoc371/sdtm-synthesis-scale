@@ -64,7 +64,7 @@ rules_tab_server <- function(input, output, session, b, current, change, notify)
   observe({
     n <- length(selected_targets())
     for (id in c("accept_rules", "reject_rules")) updateActionButton(session, id, disabled = !n)
-    updateActionButton(session, "edit_rule", disabled = n != 1)
+    updateActionButton(session, "edit_rule", disabled = n != 1 || identical(current()$rules[[selected_targets()[1]]]$op, "group"))
     updateActionButton(session, "policy_rules", disabled = !any(vapply(current()$rules[selected_targets()],
       function(r) isTRUE(r$manual), TRUE)))
   })
@@ -106,6 +106,7 @@ rules_tab_server <- function(input, output, session, b, current, change, notify)
     x <- rule$by_test[order(rule$by_test$share), ]
     x$share <- share_text(x$share)
     names(x) <- c("Test", "Checked", "Reproduced")
+    if (rule$op == "group") x$Calculation <- vapply(rule$params$derivations, derivation_label, "")[x$Test]
     compact_table(x, height = "240px")
   })
   output$rule_table <- DT::renderDT({
@@ -139,7 +140,7 @@ rules_tab_server <- function(input, output, session, b, current, change, notify)
     modalDialog(title = if (is.null(rule$origin)) "Add rule" else paste("Edit rule ·", rule$target), size = "l", easyClose = TRUE,
       bslib::layout_columns(col_widths = c(6, 6),
         selectInput("rule_target", "Target", targets, rule$target),
-        selectInput("rule_op", "Operation", setNames(names(RULE_OPS), vapply(RULE_OPS, `[[`, "", "name")), rule$op)),
+        selectInput("rule_op", "Operation", setNames(names(RULE_OPS), vapply(RULE_OPS, `[[`, "", "name"))[names(RULE_OPS) != "group"], rule$op)),
       selectizeInput("rule_inputs", "Inputs", columns, rule$inputs, multiple = TRUE,
         options = list(plugins = list("drag_drop", "remove_button"))),
       uiOutput("rule_input_help"),

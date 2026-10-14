@@ -25,7 +25,7 @@ coherence_checks <- function(study, generated) {
           sprintf("%s has %d %s", subjects, n, fixed$value[i])[n != fixed$records[i]]
         })))),
       lapply(accepted_rules(ds), function(rule) check_row(name, paste0(rule$target, " = ", rule_label(rule)),
-        which(!same_value(tryCatch(RULE_OPS[[rule$op]]$apply(rule, frame), error = function(e) rep(NA, nrow(frame))), x[[rule$target]])))),
+        which(!same_value(tryCatch(rule_values(ds, rule, frame), error = function(e) rep(NA, nrow(frame))), x[[rule$target]])))),
       Map(function(start, end) check_row(name, sprintf("%s on or before %s", start, end), which(x[[start]] > x[[end]])),
         starts[ends %in% names(x)], ends[ends %in% names(x)]),
       implication_checks(study, name, x, frame))
