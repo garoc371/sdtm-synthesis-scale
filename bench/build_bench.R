@@ -1,5 +1,5 @@
 # build_bench.R -- reproducible SDTM benchmark folders (bench28, bench72)
-# Run: Rscript bench/build_bench.R   (writes bench/data/bench28 and bench/data/bench72)
+# Run: Rscript bench/build_bench.R   (writes data/bench28 and data/bench72)
 # Needs: haven, pharmaversesdtm.
 t0 <- Sys.time()
 suppressPackageStartupMessages({ library(haven); library(pharmaversesdtm) })
@@ -7,7 +7,7 @@ suppressPackageStartupMessages({ library(haven); library(pharmaversesdtm) })
 # --- paths ---------------------------------------------------------------
 arg  <- grep("^--file=", commandArgs(FALSE), value = TRUE)
 here <- if (length(arg)) dirname(normalizePath(sub("^--file=", "", arg[1]))) else getwd()
-out  <- file.path(here, "data")
+out  <- file.path(here, "..", "data")
 pilot <- file.path(here, "..", "data", "pilot")      # CDISC pilot (in the repo)
 td    <- file.path(here, "..", "data", "pilot_td")   # CDISC pilot trial design + define.xml
 

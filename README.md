@@ -5,9 +5,10 @@ A Shiny app that learns a generator from a set of SDTM datasets and samples link
 ## Run
 
 ```r
-install.packages(c("shiny", "bslib", "DT", "ggplot2", "haven", "xml2", "nnet", "MASS", "rpart", "zip", "mirai", "digest", "jsonlite"))
 shiny::runApp()
 ```
+
+`global.R` lists the packages and stops with the `install.packages()` call for any that are missing. The start page loads uploaded files or a folder (xpt, sas7bdat, csv, define.xml), or one of the example studies in `data/` (the CDISC pilot, bench28, bench72).
 
 Options: `synth.cores` (background workers, default up to 8), `synth.cache` (cache folder, default `cache/`) and `synth.model` (model of a new node, `"auto"` for the linear models by default, or `"tree"`; also `SYNTH_MODEL` in the environment). The graph renderer (viz.js) and the font are bundled in `www/`, so nothing is sent to an external service.
 
@@ -15,7 +16,7 @@ Options: `synth.cores` (background workers, default up to 8), `synth.cache` (cac
 
 Loading a study is the only required step. Nothing waits for a confirmation.
 
-- **One policy.** Found rules that reproduce at least the policy share of checked records (90% by default) are accepted in every dataset, the others rejected. The sidebar slider changes the share for the whole study.
+- **One policy.** Found rules that reproduce at least the policy share of checked records (90% by default) are accepted in every dataset, the others rejected. The slider on the overview changes the share for the whole study.
 - **Background build.** The source is read in a worker; DM is built first (later starting graphs use its arm), then every other dataset in parallel, largest first: rules found, resolved by the policy, starting graph built, checked and fitted. Once nothing is left to build, the study is sampled and its coherence checked. The app only submits jobs and collects results, so it answers while workers compute.
 - **Cache by content.** A dataset's build is stored under a hash of its records, DM's, the code, and what the policy decides for its found rules. Loading the same study again takes seconds; a policy change rebuilds only the datasets where it changes a decision; an edit rebuilds only that dataset.
 - **Exceptions, not approvals.** The board shows every dataset as a tile, the datasets that need a look (a build error, a failed check of the graph, which leaves the dataset out of the generated data, or a failed coherence check), and a ledger of every decision ranked by the number of source records it changes.
@@ -49,12 +50,12 @@ DM has one record per subject. Findings (--TESTCD) and datasets with one record 
 
 ## Benchmark
 
-`bench/`. `Rscript bench/build_bench.R` writes two folders (needs `pharmaversesdtm`):
+`bench/`. `Rscript bench/build_bench.R` writes two folders to `data/` (needs `pharmaversesdtm`):
 
 - **bench28**: the pilot's DM, EX, LB, MH, QS, SV, VS, AE, CM; pharmaversesdtm's DS, EG, PC, PP, and the ophthalmology and oncology OE, RS, SC, TR, TU; SUPP datasets; the pilot's trial design.
 - **bench72**: bench28 with QS, LB and OE split by category (QSAD, LBCH, OEVA, …) and 34 custom-domain replicas (XA…YA: a domain's records for 70% of its subjects, with its SUPP).
 
-`bench/eval/run.sh <label> [folder]` builds the study with the app's code, generates 254 subjects for seeds 1–3 and checks them with code kept apart from the app's:
+`bench/eval/run.sh <label> [folder]` (default `data/pilot`) builds the study with the app's code, generates 254 subjects for seeds 1–3 and checks them with code kept apart from the app's:
 
 - **App checks**: the coherence checks the app runs itself.
 - **Relations**: mined on half of the real subjects and holding on the other half (date orders, functional dependencies, implications within and between datasets). One fails when, in most seeds (2 of 3), more synthetic subjects (records, for a dependency within a dataset) break it than chance allows at 1% (one-sided binomial test at 5%; one subject of 20 is not counted). Not counted: failures the real data already has as the app reads it (partial dates imputed), and in bench72 relations between a replica and a copy of the same domain (XA.XACLAS = CM.CMCLAS holds because XA copies CM).

@@ -1,3 +1,10 @@
+// A button with data-input and data-value sets that Shiny input when clicked
+// (input_button() in R/ui_helpers.R).
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-input][data-value]');
+  if (button) Shiny.setInputValue(button.dataset.input, button.dataset.value, { priority: 'event' });
+});
+
 // Draws a dataset graph with Graphviz (viz.js) and sends node clicks to Shiny.
 // A graph is a div.dag with data-dot (Graphviz source), data-input (Shiny input id),
 // data-selected (the selected node) and data-key (the dataset name; zoom, position and

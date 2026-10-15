@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 28 28">
+  <!-- A small graph: two nodes feeding a third. -->
+  <rect width="28" height="28" rx="7" fill="#14706b"/>
+  <path d="M9 9 L14 19 M19 9 L14 19" stroke="#bfe3df" stroke-width="1.6"/>
+  <circle cx="9" cy="9" r="3" fill="#fff"/>
+  <circle cx="19" cy="9" r="3" fill="#fff"/>
+  <circle cx="14" cy="19" r="3.4" fill="#f2c46d"/>
+</svg>
