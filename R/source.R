@@ -4,6 +4,7 @@
 # and everything else keeps its source type.
 
 MISSING <- "(missing)"
+RARE <- "(rare)"
 
 read_folder <- function(directory) {
   files <- list.files(directory, "\\.(xpt|sas7bdat|csv|xml)$", full.names = TRUE, ignore.case = TRUE)

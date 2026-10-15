@@ -7,13 +7,15 @@
 #   number              whether a value is recorded, then a linear model of its normal score
 #                       (its percentile in the source, on the normal scale); a drawn score is
 #                       read back through the source's percentiles, so the value keeps the
-#                       source's shape, range and repeated values (a dose of 1 mg)
+#                       source's shape and repeated values (a dose of 1 mg); the ends leave
+#                       out the most extreme subjects
 #   tree                a classification or regression tree (CART, as in synthpop): a value
 #                       is drawn from the counts of its leaf, or a number from its quantiles
 # Fits keep coefficients and summaries only, never source rows; implications keep the
-# values they tie together.
+# values they tie together. No fit, lookup table or implication keeps a value held by fewer
+# than min_subjects() subjects.
 
-MIN_LEVEL_COUNT <- 5
+MIN_SUBJECTS <- 5
 MAX_MODEL_LEVELS <- 30
 MAX_DISCRETE_VALUES <- 10
 NUMBER_QUANTILES <- seq(0, 1, 0.01)
@@ -22,11 +24,41 @@ NODE_MODELS <- c(auto = "Linear (automatic)", number = "Linear (number)", catego
 # synth.model, or SYNTH_MODEL in the environment, which the workers share).
 default_node_model <- function() getOption("synth.model", Sys.getenv("SYNTH_MODEL", "auto"))
 
+# The fewest subjects a value must be held by to be kept (k): a category value, a predictor
+# level, a lookup row or an implication held by fewer is dropped, and a number's ends leave
+# out the k subjects with the lowest and the k with the highest values (option
+# synth.min_subjects, or SYNTH_MIN_SUBJECTS in the environment, which the workers share).
+min_subjects <- function() as.integer(getOption("synth.min_subjects", Sys.getenv("SYNTH_MIN_SUBJECTS", MIN_SUBJECTS)))
+
+# For each record, the number of subjects holding its value (missing being a value).
+subjects_holding <- function(value, subject) {
+  code <- match(value, unique(value))
+  first <- !duplicated(data.frame(code, subject))
+  tabulate(code[first], max(code, 0L))[code]
+}
+
+# Spine features that say the subject died: T.DIED, a date equal to DTHDTC. The spine copies
+# the death date, so a value these force (DEATH, FATAL) may be held by fewer than
+# min_subjects() subjects (see `fit_implications()` and the lookup's `learn`).
+DEATH_KEY <- "^T[.](DIED|.*=DTHDTC)$"
+
+# Records dated on the subject's death date (in DM, those of subjects who died where the
+# key is a death feature): a lookup keeps a key of fewer than min_subjects() subjects found
+# only there (DEATH).
+death_records <- function(frame, inputs) {
+  died <- frame[["DM.DTHDTC"]]
+  if (is.null(died)) return(all(grepl(DEATH_KEY, inputs)) & frame[["T.DIED"]] %in% "Y")
+  dates <- names(Filter(function(v) inherits(v, "Date"), frame))
+  same <- lapply(frame[dates[!grepl("^(DM|LINK)[.]", dates)]], function(v) as.numeric(v) == as.numeric(died))
+  Reduce(`|`, lapply(same, `%in%`, TRUE), rep(FALSE, nrow(frame)))
+}
+
 # ---- Design matrices ------------------------------------------------------------------
 
 # Numeric predictors are standardised (missing values sit at the mean); categorical ones
-# use the most common level as reference. Rare and unseen levels share the reference.
-design_info <- function(frame, predictors, categorical = character()) {
+# use the most common level as reference. Levels of fewer than min_subjects() subjects and
+# unseen levels share the reference.
+design_info <- function(frame, predictors, categorical = character(), subject = frame$USUBJID) {
   lapply(setNames(predictors, predictors), function(p) {
     v <- frame[[p]]
     if (inherits(v, "Date")) v <- as.numeric(v)
@@ -36,8 +68,10 @@ design_info <- function(frame, predictors, categorical = character()) {
       list(type = "numeric", center = if (is.finite(center)) center else 0,
         scale = if (is.finite(scale) && scale > 0) scale else 1)
     } else {
-      counts <- sort(table(level_string(v)), decreasing = TRUE)
-      list(type = "categorical", levels = names(counts)[seq_along(counts) == 1 | counts >= MIN_LEVEL_COUNT])
+      s <- level_string(v)
+      counts <- sort(table(s), decreasing = TRUE)
+      levels <- intersect(names(counts), s[subjects_holding(s, subject) >= min_subjects()])
+      list(type = "categorical", levels = if (length(levels)) levels else "")
     }
   })
 }
@@ -107,13 +141,13 @@ part_aic <- function(y, X, type) {
 }
 
 # One model part. A category with too many values to model and a coarser category derived
-# from it (`coarse`) models the coarse value; its values are drawn within the coarse one (see
-# `fit_within`). Predictors are used only with at least 10 values per coefficient; for
+# from it (`coarse`, given by `fit_node()`) models the coarse value; its values are drawn
+# within the coarse one (see `fit_within`). Predictors are used only with at least 10 values per coefficient; for
 # categories, 10 values outside the most common one (a rare value is not learnt per level).
 # When not all of them fit, whole predictors are added one at a time, the one that lowers
 # the AIC most first, while they fit and lower it (36 retrieval terms keep the visit).
 fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL, se = FALSE, strata = character(), subject = seq_along(y)) {
-  if (type == "categories" && !is.null(coarse) && length(unique(level_string(y))) > MAX_MODEL_LEVELS) {
+  if (type == "categories" && !is.null(coarse)) {
     fit <- fit_part(coarse, X, type, groups, se = se)
     fit$within <- fit_within(level_string(y), level_string(coarse), X, groups, strata, subject)
     fit$numeric <- is.numeric(y)
@@ -159,11 +193,16 @@ fit_part <- function(y, X, type, groups = colnames(X), coarse = NULL, se = FALSE
 # categorical predictors that tell them apart (an application-site reaction only after the
 # first dose): predictors are added one at a time while they lower the AIC. Subjects count,
 # not records (a subject's events share their last visit), so a record weighs one over its
-# subject's records. A coarse value whose predictor levels have fewer than MIN_LEVEL_COUNT
-# subjects uses its table over all levels.
+# subject's records. A coarse value whose predictor levels have fewer than min_subjects()
+# subjects uses its table over all levels. Rare values (RARE, see `fit_node()`) are left out.
 fit_within <- function(fine, coarse, X, groups, strata, subject) {
+  drawn <- fine != RARE
+  fine <- fine[drawn]
+  coarse <- coarse[drawn]
+  X <- X[drawn, , drop = FALSE]
+  subject <- subject[drawn]
   weight <- 1 / as.vector(table(subject)[subject])
-  big <- function(key) { n <- tapply(subject, key, function(s) length(unique(s))); key %in% names(n)[n >= MIN_LEVEL_COUNT] }
+  big <- function(key) subjects_holding(key, subject) >= min_subjects()
   share <- function(key) { cell <- paste(key, fine, sep = "\t"); as.vector(table(cell)[cell] / table(key)[key]) }
   overall <- share(coarse)
   cells <- function(by) paste(coarse, if (length(by)) do.call(paste, c(as.data.frame(X[, groups %in% by, drop = FALSE]), sep = " ")), sep = "\r")
@@ -201,15 +240,36 @@ draw_within <- function(w, coarse, X, groups) {
 }
 
 # Values on a grid coarser than their decimals (whole mg/dL converted to mmol/L: glucose
-# 0.05551 apart) as origin and step, so drawn values stay conversions of whole numbers.
-value_grid <- function(v) {
+# 0.05551 apart) as origin and step, so drawn values stay conversions of whole numbers. The
+# origin is the grid point nearest `at`, not the source minimum.
+value_grid <- function(v, at = min(v)) {
   u <- sort(unique(v))
   tolerance <- 10^-decimals(v)
   if (length(u) < 10 || min(diff(u)) <= 1.5 * tolerance) return(NULL)
   k <- round((u - u[1]) / min(diff(u)))
   fit <- stats::lm.fit(cbind(1, k), u)
   if (max(abs(fit$residuals)) > tolerance) return(NULL)
-  unname(fit$coefficients)
+  step <- unname(fit$coefficients[2])
+  c(unname(fit$coefficients[1]) + round((at - fit$coefficients[1]) / step) * step, step)
+}
+
+# A number's source percentiles, with ends that leave out the k subjects with the lowest and
+# the k with the highest values, so the real minimum and maximum are not kept: percentiles
+# beyond are set to the ends. With too few subjects every percentile is the median.
+number_margin <- function(v, subject, k = min_subjects()) {
+  observed <- !is.na(v)
+  v <- v[observed]
+  subject <- subject[observed]
+  q <- stats::quantile(v, NUMBER_QUANTILES, names = FALSE)
+  ends <- number_ends(v, subject, k)
+  pmin(pmax(q, ends[1]), ends[2])
+}
+
+number_ends <- function(v, subject, k = min_subjects()) {
+  low <- sort(tapply(v, subject, min))
+  high <- sort(tapply(v, subject, max), decreasing = TRUE)
+  ends <- if (length(low) > k) unname(c(low[k + 1], high[k + 1])) else c(Inf, -Inf)
+  if (ends[1] > ends[2]) rep(stats::median(v), 2) else ends
 }
 
 # Normal score of x given a number's source percentiles q: its percentile (a repeated value
@@ -272,8 +332,29 @@ fit_node <- function(ds, variable, frame, arm) {
     if (!is.numeric(v) || model == "categories" || (model == "auto" && length(unique(v)) <= MAX_DISCRETE_VALUES) || length(unique(v)) < 2)
       "categories" else "number"
   }, "")
-  margins <- lapply(by_test, function(i) { v <- value(i); if (is.numeric(v)) stats::quantile(v, NUMBER_QUANTILES, na.rm = TRUE, names = FALSE) })
-  fits <- lapply(split(seq_along(y), parts$key), function(i) {
+  margins <- lapply(by_test, function(i) { v <- value(i); if (is.numeric(v)) number_margin(v, frame$USUBJID[i]) })
+  # A category value held by fewer than min_subjects() subjects of its test is never drawn:
+  # its records are left out of the fit (a test with none left stays missing), and the
+  # implications pool it. Where a lookup derives a coarse value from the node (DSDECOD from
+  # DSTERM), a rare value whose coarse value is common but has no common value of its own is
+  # drawn as that coarse value (WITHDRAWAL BY SUBJECT, whose 22 verbatims are each rare). A
+  # test with too many values to model, drawn within its coarse value, keeps the records of
+  # every common coarse value in that model; its rare values are not drawn within it.
+  kept <- rep(TRUE, length(y))
+  within <- rep(FALSE, length(y))
+  fine <- y
+  for (i in by_test[types == "categories"]) {
+    held <- is.na(y[i]) | subjects_holding(level_string(y[i]), frame$USUBJID[i]) >= min_subjects()
+    if (is.null(coarse) || !is.character(y)) {
+      kept[i] <- held
+      next
+    }
+    common <- subjects_holding(coarse[i], frame$USUBJID[i]) >= min_subjects()
+    fine[i[!held]] <- ifelse(common[!held] & !coarse[i[!held]] %in% coarse[i[held]], coarse[i[!held]], RARE)
+    within[i] <- !tree && length(unique(level_string(y[i]))) > MAX_MODEL_LEVELS
+    kept[i] <- if (within[i[1]]) common else !fine[i] %in% RARE
+  }
+  fits <- lapply(split(which(kept), parts$key[kept]), function(i) {
     follow <- grepl("|follow", parts$key[i[1]], fixed = TRUE)
     type <- unname(types[match(parts$scale[i[1]], names(types))])
     margin <- if (type == "number" && !tree) margins[[match(parts$scale[i[1]], names(margins))]]
@@ -282,14 +363,14 @@ fit_node <- function(ds, variable, frame, arm) {
     records$.earlier <- if (!is.null(margin)) normal_score(margin, earlier[i]) else earlier[i]
     used <- if (follow) c(predictors, ".previous", if (type == "number") ".earlier") else if (isTRUE(node$prev)) setdiff(predictors, arm) else predictors
     text <- if (type == "number" && is.character(y)) number_format(y[i])
-    if (tree) return(c(fit_tree(if (type == "number") value(i) else y[i], records, used, type == "categories"), list(text = text)))
+    if (tree) return(c(fit_tree(if (type == "number") value(i) else fine[i], records, used, type == "categories"), list(text = text)))
     info <- design_info(records, used, c("VISITNUM", s$test))
-    if (type == "categories") return(c(fit_part(y[i], design_matrix(info, records), type, design_groups(info), coarse[i], isTRUE(node$vary),
+    if (type == "categories") return(c(fit_part(fine[i], design_matrix(info, records), type, design_groups(info), if (within[i[1]]) coarse[i], isTRUE(node$vary),
       names(Filter(function(p) p$type == "categorical", info)), records$USUBJID), list(info = info)))
     v <- value(i)
     v <- v[!is.na(v)]
     c(fit_part(normal_score(margin, value(i)), design_matrix(info, records), type, design_groups(info)),
-      list(info = info, margin = margin, digits = decimals(v), grid = value_grid(v), text = text))
+      list(info = info, margin = margin, digits = decimals(v), grid = value_grid(v, margin[1]), text = text))
   })
   # Implications are found within a test: the last visit gives PROTOCOL COMPLETED to the
   # disposition event, not to the subject's other DS records. A number keeps those of its
@@ -298,7 +379,8 @@ fit_node <- function(ds, variable, frame, arm) {
   if (ds$name != "DM" && level == "subject") keys <- keys[!record_feature(keys)]
   implications <- do.call(rbind, lapply(by_test, function(i) {
     out <- if (types[match(parts$scale[i[1]], names(types))] == "categories")
-      rbind(fit_implications(y[i], frame[i, , drop = FALSE], keys), derived_implications(ds, variable, y[i], frame[i, , drop = FALSE], keys)) else {
+      rbind(fit_implications(fine[i], frame[i, , drop = FALSE], keys, !kept[i] | fine[i] %in% RARE, y[i]),
+        derived_implications(ds, variable, y[i], frame[i, , drop = FALSE], keys, fine[i], !kept[i] | fine[i] %in% RARE)) else {
       out <- fit_implications(ifelse(is.na(y[i]), NA, "recorded"), frame[i, , drop = FALSE], keys)
       if (NROW(out)) out[vapply(out$value, identical, TRUE, MISSING), , drop = FALSE]
     }
@@ -337,13 +419,16 @@ number_text <- function(x, fixed, digits) {
 
 # The values of the coarsest useful category derived from a node by an accepted lookup on
 # the node alone (DSDECOD from 36 verbatim DSTERM terms, a body system from AELLT): the one
-# with most values, at most MAX_MODEL_LEVELS. NULL when there is none.
+# with most values, at most MAX_MODEL_LEVELS. NULL when there is none. The source's values
+# are used where it has the column and the table was not edited, as the table leaves out
+# rare verbatims.
 coarse_values <- function(ds, variable, y, frame) {
   rules <- Filter(function(r) r$op == "lookup" && identical(r$inputs, variable), accepted_rules(ds))
   if (!length(rules)) return(NULL)
   values <- level_string(y)
   first <- frame[!duplicated(values), , drop = FALSE]
-  derived <- lapply(rules, function(r) level_string(RULE_OPS$lookup$apply(r, first))[match(values, level_string(first[[variable]]))])
+  derived <- lapply(rules, function(r) if (!isTRUE(r$params$edited) && r$target %in% names(frame)) level_string(frame[[r$target]]) else
+    level_string(RULE_OPS$lookup$apply(r, first))[match(values, level_string(first[[variable]]))])
   n <- vapply(derived, function(d) length(unique(d)), 0L)
   ok <- which(n > 1 & n <= MAX_MODEL_LEVELS)
   if (length(ok)) derived[[ok[which.max(n[ok])]]]
@@ -381,9 +466,17 @@ tree_data <- function(records, predictors, levels = NULL, common = NULL) {
 
 # A category is fitted as one class (missing being a class); a number as whether it is
 # recorded and, when recorded, its value. The tree keeps its splits and, per leaf, the class
-# counts or 21 quantiles of the value; leaves are found again by numbering the tree's nodes.
+# counts or 21 quantiles of the value (within the number's ends, see `number_margin()`);
+# leaves are found again by numbering the tree's nodes. A predictor level of fewer than
+# min_subjects() subjects is read as the most common level.
 fit_tree <- function(y, records, predictors, categorical) {
   x <- tree_data(records, predictors)
+  for (p in names(x)) if (is.factor(x[[p]])) {
+    v <- as.character(x[[p]])
+    rare <- subjects_holding(v, records$USUBJID) < min_subjects()
+    v[rare] <- names(which.max(table(v)))
+    x[[p]] <- factor(v)
+  }
   levels <- setNames(lapply(x, levels), predictors)
   common <- lapply(x, function(v) if (is.factor(v)) names(which.max(table(v))))
   control <- rpart::rpart.control(minbucket = TREE_MIN_LEAF, minsplit = 2 * TREE_MIN_LEAF, cp = 1e-8, xval = 0,
@@ -416,10 +509,11 @@ fit_tree <- function(y, records, predictors, categorical) {
   }
   g <- grow(y[observed], which(observed), "anova")
   out$tree <- g$tree
-  out$quantiles <- do.call(rbind, tapply(y[observed], factor(g$leaf, unique(g$leaf)), stats::quantile, TREE_QUANTILES, names = FALSE))
+  ends <- number_ends(y[observed], records$USUBJID[observed])
+  out$quantiles <- pmin(pmax(do.call(rbind, tapply(y[observed], factor(g$leaf, unique(g$leaf)), stats::quantile, TREE_QUANTILES, names = FALSE)), ends[1]), ends[2])
   out$leaves <- nrow(out$quantiles)
   out$digits <- decimals(y[observed])
-  out$grid <- value_grid(y[observed])
+  out$grid <- value_grid(y[observed], ends[1])
   out
 }
 

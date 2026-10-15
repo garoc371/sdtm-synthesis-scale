@@ -225,8 +225,14 @@ implication_keys <- function(ds, frame) {
     length(unique(frame[[k]])) %in% 2:IMPLICATION_KEY_VALUES, candidates)
 }
 
-fit_implications <- function(y, frame, keys) {
+# Values of fewer than min_subjects() subjects (rare) count as one pooled value: they still
+# stand against a forced value, but no implication of their own is kept. Key levels of fewer
+# than min_subjects() subjects are pooled the same way (a value never at any rare visit is
+# not drawn there); `known` keeps the key levels that are not pooled. A death feature
+# (DEATH_KEY) forces its value as the source has it (`source`), however rare.
+fit_implications <- function(y, frame, keys, rare = rep(FALSE, length(y)), source = y) {
   values <- level_string(y)
+  values[rare] <- RARE
   subject <- factor(frame$USUBJID, unique(frame$USUBJID))
   # Per level: the subjects that have it and the mean of their record shares.
   subjects <- function(groups) colSums(table(subject, groups) > 0)
@@ -239,10 +245,13 @@ fit_implications <- function(y, frame, keys) {
   rows <- list()
   for (k in keys) {
     key <- level_string(frame[[k]])
+    common <- subjects_holding(key, frame$USUBJID) >= min_subjects()
+    known <- unique(key[common])
+    key[!common] <- RARE
     present <- table(key, values) > 0
     n_key <- subjects(key)[rownames(present)]
     p_key <- share(key)[rownames(present)]
-    forced <- which(n_key >= 2 & rowSums(present) == 1)
+    forced <- which(n_key >= min_subjects() & rowSums(present) == 1)
     with <- apply(present[forced, , drop = FALSE], 1, which)
     forced <- forced[p_value[colnames(present)][with]^n_key[forced] < IMPLICATION_P]
     # Key levels a value is never at are ruled out when, by chance, some of its subjects would
@@ -254,16 +263,25 @@ fit_implications <- function(y, frame, keys) {
     absent <- !present
     together <- (1 - colSums(absent * p_key))^n * choose(nrow(present), colSums(absent)) < IMPLICATION_P
     never <- absent & (outer(1 - p_key, n, `^`) < IMPLICATION_P | rep(together, each = nrow(absent)))
-    only <- which(n >= 2 & colSums(never) > 0)
+    only <- which(n >= min_subjects() & colSums(never) > 0)
     if (length(forced)) rows[[length(rows) + 1]] <- data.frame(kind = "forced", key = k, level = I(as.list(rownames(present)[forced])),
-      value = I(as.list(colnames(present)[with[names(forced)]])), stringsAsFactors = FALSE)
+      value = I(as.list(colnames(present)[with[names(forced)]])), known = I(rep(list(known), length(forced))), stringsAsFactors = FALSE)
     if (length(only)) rows[[length(rows) + 1]] <- data.frame(kind = "only", key = k,
-      level = I(lapply(only, function(j) rownames(present)[!never[, j]])), value = I(as.list(colnames(present)[only])), stringsAsFactors = FALSE)
+      level = I(lapply(only, function(j) rownames(present)[!never[, j]])), value = I(as.list(colnames(present)[only])),
+      known = I(rep(list(known), length(only))), stringsAsFactors = FALSE)
+    if (grepl(DEATH_KEY, k) && !"Y" %in% rownames(present)[forced]) {
+      died <- level_string(frame[[k]]) == "Y"
+      v <- unique(level_string(source)[died])
+      if (length(v) == 1 && mean(level_string(source) == v)^length(unique(frame$USUBJID[died])) < IMPLICATION_P)
+        rows[[length(rows) + 1]] <- data.frame(kind = "forced", key = k, level = I(list("Y")), value = I(list(v)),
+          known = I(list(union(known, "Y"))), stringsAsFactors = FALSE)
+    }
   }
   out <- do.call(rbind, rows)
-  if (is.null(out)) return(NULL)
+  if (!is.null(out)) out <- out[!vapply(out$value, identical, TRUE, RARE), , drop = FALSE]
+  if (!NROW(out)) return(NULL)
   rownames(out) <- NULL
-  out$typed <- I(lapply(out$value, function(v) if (v == MISSING) NA else y[match(v, values)]))
+  out$typed <- I(lapply(out$value, function(v) if (v == MISSING) NA else c(y[values == v], source[level_string(source) == v])[1]))
   out$via <- NA_character_
   out
 }
@@ -271,7 +289,10 @@ fit_implications <- function(y, frame, keys) {
 # A category that lookups derive from the node alone (CMROUTE from CMTRT) keeps its "only"
 # implications through the node: the node values that give it (every topical medication)
 # only where the key allows it. One drug is too rare to show the pattern; its route is not.
-derived_implications <- function(ds, variable, y, frame, keys) {
+# The route is the source's where it has the column and the table was not edited, as the
+# table leaves out rare drugs (see `coarse_values()`); the implication lists the values as
+# drawn (`drawn`), without the rare ones.
+derived_implications <- function(ds, variable, y, frame, keys, drawn = y, rare = rep(FALSE, length(y))) {
   chain <- list()
   known <- variable
   repeat {
@@ -284,12 +305,14 @@ derived_implications <- function(ds, variable, y, frame, keys) {
   first <- frame[!duplicated(values), , drop = FALSE]
   for (r in chain) first[[r$target]] <- RULE_OPS$lookup$apply(r, first)
   do.call(rbind, lapply(chain, function(r) {
-    derived <- level_string(first[[r$target]])[match(values, level_string(first[[variable]]))]
+    derived <- if (!isTRUE(r$params$edited) && r$target %in% names(frame)) level_string(frame[[r$target]]) else
+      level_string(first[[r$target]])[match(values, level_string(first[[variable]]))]
     out <- fit_implications(derived, frame, keys)
     out <- out[out$kind == "only", , drop = FALSE]
     if (!NROW(out)) return(NULL)
     out$via <- paste(r$target, "=", unlist(out$value))
-    out$value <- I(lapply(unlist(out$value), function(v) unique(values[derived == v])))
+    out$value <- I(lapply(unlist(out$value), function(v) unique(level_string(drawn)[derived == v & !rare])))
+    out <- out[lengths(out$value) > 0, , drop = FALSE]
     out$typed <- I(rep(list(NULL), nrow(out)))
     out
   }))
@@ -311,7 +334,7 @@ implication_violations <- function(implications, values, frame) {
   keys <- strings(implications$key, level_string)
   tests <- strings(implications$within, format_value)
   for (i in seq_len(NROW(implications))) {
-    key <- keys[[implications$key[i]]]
+    key <- implication_key(implications, i, keys[[implications$key[i]]])
     within <- implications$within[i]
     rows <- if (is.null(within) || is.na(within)) TRUE else tests[[within]] == implications$part[i]
     bad <- bad | rows & if (implications$kind[i] == "forced")
@@ -320,8 +343,15 @@ implication_violations <- function(implications, values, frame) {
   bad
 }
 
+# The key's strings, with the levels the implication pooled (see `fit_implications()`) as RARE.
+implication_key <- function(implications, i, key) {
+  known <- if (!is.null(implications$known)) implications$known[[i]]
+  if (is.null(known)) key else ifelse(key %in% known, key, RARE)
+}
+
 # "Only" values out of place are redrawn from the model a few times, then replaced by a
-# value drawn for another record of the same test that is allowed there; forced values are
+# value drawn for another record of the same test that is allowed there, or left missing
+# where none is (where the source has only values too rare to draw); forced values are
 # then set.
 apply_implications <- function(implications, values, frame, redraw) {
   if (is.null(implications)) return(values)
@@ -343,10 +373,11 @@ apply_implications <- function(implications, values, frame, redraw) {
     weight <- tabulate(match(pool, unique(pool)))
     ok <- which(!misplaced(options, rep(i, length(options))))
     if (length(ok)) values[i] <- options[ok[sample.int(length(ok), 1, prob = weight[ok])]]
+    else if (!misplaced(NA, i)) values[i] <- NA
   }
   forced <- implications[implications$kind == "forced", , drop = FALSE]
   for (i in seq_len(nrow(forced))) {
-    rows <- level_string(frame[[forced$key[i]]]) %in% forced$level[[i]] & implication_rows(forced, i, frame)
+    rows <- implication_key(forced, i, level_string(frame[[forced$key[i]]])) %in% forced$level[[i]] & implication_rows(forced, i, frame)
     values[rows] <- forced$typed[[i]]
   }
   values

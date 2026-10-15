@@ -55,7 +55,7 @@ start_workers <- function(n, dir = "R") {
 
 content_key <- function(...) digest::digest(list(...), algo = "xxhash64")
 
-code_version <- function(dir = "R") content_key(lapply(file.path(dir, CORE_FILES), readLines), default_node_model())
+code_version <- function(dir = "R") content_key(lapply(file.path(dir, CORE_FILES), readLines), default_node_model(), min_subjects())
 
 cache_file <- function(dir, key) file.path(dir, paste0(key, ".rds"))
 

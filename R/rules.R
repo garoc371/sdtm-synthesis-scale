@@ -164,9 +164,29 @@ RULE_OPS <- list(
       info$keys[good]
     },
     learn = function(rule, frame) {
-      first <- lookup_rows(group_index(frame, rule$inputs), group_index(frame, rule$target))
+      group <- group_index(frame, rule$inputs)
+      y <- group_index(frame, rule$target)
+      first <- lookup_rows(group, y)
+      subject <- record_subject(frame)
+      # A key and value held together by fewer than min_subjects() subjects is not kept, unless
+      # the key is only on records dated on the death date and every subject who died holds
+      # them (DEATH; not a cause of death), or is a death feature (DTHFL, see DEATH_KEY). A
+      # value of at least min_subjects() subjects whose keys are all dropped becomes its own
+      # key, as a verbatim too rare to draw is drawn as its coded value (see `fit_node()`).
+      death <- death_records(frame, rule$inputs)
+      died <- length(unique(subject[death]))
+      pair <- subjects_holding(paste(group, y), subject)[first]
+      held <- pair >= min_subjects() | tapply(death, group, all)[as.character(group[first])] %in% TRUE &
+        (all(grepl(DEATH_KEY, rule$inputs)) | pair == died & died > 1)
+      own <- first[!held & subjects_holding(y, subject)[first] >= min_subjects() & !y[first] %in% y[first[held]]]
+      own <- own[!duplicated(y[own])]
+      first <- first[held]
       table <- frame[first, rule$inputs, drop = FALSE]
       table$value <- frame[[rule$target]][first]
+      if (length(own) && length(rule$inputs) == 1 && is.character(frame[[rule$inputs]]) && is.character(table$value)) {
+        own <- own[!frame[[rule$target]][own] %in% table[[rule$inputs]]]
+        table <- rbind(table, stats::setNames(data.frame(frame[[rule$target]][own], frame[[rule$target]][own], stringsAsFactors = FALSE), c(rule$inputs, "value")))
+      }
       rownames(table) <- NULL
       list(table = table)
     },
@@ -597,7 +617,7 @@ find_derivations <- function(frame, target, test, groups, skip = NULL) {
         key <- values_key(values[g, inputs, drop = FALSE])
         keyed <- which(!is.na(key))
         first <- keyed[lookup_rows(match(key[keyed], unique(key[keyed])), match(level_y[keyed], unique(level_y[keyed])))]
-        first <- first[!is.na(y[rows][first])]
+        first <- first[!is.na(y[rows][first]) & subjects_holding(paste(key, level_y), subject[rows])[first] >= min_subjects()]
         keep(list(test = j, kind = "lookup", inputs = inputs, keys = key[first], values = y[rows][first], digits = digits), fit$value, fit$match)
       }
     }
