@@ -1,12 +1,14 @@
-# Independent coherence check. Relations are mined on a random half of the real subjects
-# (holding for 100% of them), kept when they hold for >= 99% of the other half, and tested
-# on synthetic data (pass when they hold for >= 99%). Nothing here reads the pipeline's
-# rules or edges.
-#   Rscript check.R <label> <seed files...>   (rds files from gen.R)
+# Relation score. Relations are mined on the members (the half of the real subjects the
+# generator was built on, from gen.R's split), holding for all of them and resting on at
+# least SUPPORT subjects. A relation is preserved in a seed when the synthetic data break it
+# no more often than the held-out half does (as the app reads it, partial dates imputed),
+# plus TOL. Nothing here reads the pipeline's rules or edges.
+#   Rscript check.R <label> <seed files...>   (rds files from gen.R; SUPPORT=5, TOL=0.05, SHOW=1 lists failures)
 source(file.path(dirname(normalizePath(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1]))), "common.R"))
 real <- read_real(DATA)
 DATASETS <- names(real)[vapply(real, function(x) "USUBJID" %in% names(x) && nrow(x) > 0, TRUE)]
-HOLD <- 0.99
+SUPPORT <- as.integer(Sys.getenv("SUPPORT", "5"))
+TOL <- as.numeric(Sys.getenv("TOL", "0.05"))
 
 TIMING_SUFFIX <- c("DY", "STDY", "ENDY", "DUR", "TPT", "TPTNUM", "ELTM", "TPTREF", "STRF", "ENRF", "EVLINT", "STRTPT",
   "STTPT", "ENRTPT", "ENTPT")
@@ -92,20 +94,21 @@ mine <- function(A) {
   ids <- A$DM$USUBJID
   rel <- list()
   add <- function(...) rel[[length(rel) + 1]] <<- data.frame(..., stringsAsFactors = FALSE)
-  # Categories: values held by >= 5 subjects (dates) / >= 3 subjects (indicators).
+  subjects <- function(u) length(unique(u))
+  # Categories: values held by SUPPORT subjects or more.
   categories <- lapply(setNames(names(A), names(A)), function(d) {
     if (d == "DM") return(NULL)
     x <- A[[d]]
     cols <- category_columns(d, x)
     res <- lapply(setNames(cols, cols), function(cv) {
-      n <- tapply(x$USUBJID, as.character(x[[cv]]), function(u) length(unique(u)))
-      n[n >= 3]
+      n <- tapply(x$USUBJID, as.character(x[[cv]]), subjects)
+      n[n >= SUPPORT]
     })
     Filter(length, res)
   })
   dm_categories <- lapply(setNames(nm = category_columns("DM", A$DM)), function(v) {
     n <- table(as.character(A$DM[[v]]))
-    names(n)[n >= 3]
+    names(n)[n >= SUPPORT]
   })
   # 1. Date relations between subject nodes of different datasets (or DM); category nodes only against DM dates.
   nodes <- date_nodes(A, ids, categories)
@@ -117,7 +120,7 @@ mine <- function(A) {
     if ((is_category_node(a) || is_category_node(b)) && !(startsWith(a, "DM.") || startsWith(b, "DM."))) next
     if (is_category_node(a) && is_category_node(b)) next
     both <- !is.na(nodes[[a]]) & !is.na(nodes[[b]])
-    if (sum(both) < 10) next
+    if (sum(both) < SUPPORT) next
     g <- nodes[[b]][both] - nodes[[a]][both]
     if (all(g == 0)) add(kind = "date", a = a, rel = "=", b = b)
     else if (all(g >= 0)) add(kind = "date", a = a, rel = "<=", b = b)
@@ -129,7 +132,7 @@ mine <- function(A) {
     dates <- names(x)[vapply(x, inherits, TRUE, "Date")]
     for (a in dates) for (b in dates) if (a < b) {
       both <- !is.na(x[[a]]) & !is.na(x[[b]])
-      if (sum(both) < 10) next
+      if (subjects(x$USUBJID[both]) < SUPPORT) next
       g <- as.numeric(x[[b]][both] - x[[a]][both])
       if (all(g == 0)) add(kind = "record date", a = paste0(d, ".", a), rel = "=", b = paste0(d, ".", b))
       else if (all(g >= 0)) add(kind = "record date", a = paste0(d, ".", a), rel = "<=", b = paste0(d, ".", b))
@@ -143,11 +146,11 @@ mine <- function(A) {
     x <- A[[d]]
     if (!"VISITNUM" %in% names(x) || !nrow(x)) next
     k <- paste(x$USUBJID, x$VISITNUM)
-    if (mean(k %in% svkey) == 1) add(kind = "visit", a = paste0(d, ".VISITNUM"), rel = "in", b = "SV.VISITNUM")
+    if (subjects(x$USUBJID) >= SUPPORT && mean(k %in% svkey) == 1) add(kind = "visit", a = paste0(d, ".VISITNUM"), rel = "in", b = "SV.VISITNUM")
     for (v in names(x)[vapply(x, inherits, TRUE, "Date")]) {
       s <- sv$SVSTDTC[match(k, svkey)]
       ok <- !is.na(x[[v]]) & !is.na(s)
-      if (sum(ok) >= 10 && all(x[[v]][ok] == s[ok])) add(kind = "visit", a = paste0(d, ".", v), rel = "= visit date", b = "SV.SVSTDTC")
+      if (subjects(x$USUBJID[ok]) >= SUPPORT && all(x[[v]][ok] == s[ok])) add(kind = "visit", a = paste0(d, ".", v), rel = "= visit date", b = "SV.SVSTDTC")
     }
   }
   # 4. Implications between subject indicators of different datasets.
@@ -157,7 +160,7 @@ mine <- function(A) {
   co <- crossprod(M)
   nms <- colnames(M)
   ds <- indicator_dataset(nms)
-  for (i in which(na >= 3)) for (j in seq_along(nms)) {
+  for (i in which(na >= SUPPORT)) for (j in seq_along(nms)) {
     if (ds[i] == ds[j] || na[j] == nrow(M) || na[j] == 0) next
     # Keep only implications that would be unlikely (p < 0.001) if the two were independent.
     pb <- na[j] / nrow(M)
@@ -179,9 +182,8 @@ mine <- function(A) {
     dmk <- if (d != "DM") paste0("DM.", intersect(names(dm_categories), names(A$DM)))
     fd <- function(key, y) {
       g <- do.call(paste, c(lapply(x[key], as.character), sep = "\r"))
-      size <- table(g)[g]
-      chk <- size >= 2
-      if (sum(chk) < 20) return(FALSE)
+      chk <- checked_groups(g, x$USUBJID)
+      if (subjects(x$USUBJID[chk]) < SUPPORT) return(FALSE)
       yy <- as.character(x[[y]]); yy[is.na(yy)] <- "\rNA"
       length(unique(paste(g, yy)[chk])) == length(unique(g[chk]))
     }
@@ -194,6 +196,13 @@ mine <- function(A) {
     }
   }
   list(relations = do.call(rbind, rel), categories = categories, dm_categories = dm_categories)
+}
+
+# Records whose key group spans two subjects or more, so that one subject's repeated records
+# do not make a dependency.
+checked_groups <- function(g, subject) {
+  span <- tapply(subject, g, function(u) length(unique(u)))
+  span[g] >= 2
 }
 
 # ---- Evaluation: share of subjects / records for which a relation holds ------------------
@@ -254,8 +263,7 @@ evaluate <- function(m, data) {
         if (!all(c(key, y) %in% names(x))) return(none)
         g <- do.call(paste, c(lapply(x[key], as.character), sep = "\r"))
         yy <- as.character(x[[y]]); yy[is.na(yy)] <- "\rNA"
-        size <- table(g)[g]
-        chk <- size >= 2
+        chk <- checked_groups(g, x$USUBJID)
         if (!any(chk)) return(none)
         # Share of checked records that carry their group's most common value.
         top <- tapply(yy[chk], g[chk], function(z) max(table(z)))
@@ -287,26 +295,43 @@ if (sys.nframe() == 0L) {
   args <- commandArgs(TRUE)
   label <- args[1]
   files <- args[-1]
+  split <- readRDS(file.path(OUT, paste0(label, "_split.rds")))
   synth <- lapply(files, function(f) normalise(readRDS(f)$data))
-  real_n <- normalise(real)
-  results <- list()
-  for (split in 1:3) {
-    set.seed(100 + split)
-    ids <- real_n$DM$USUBJID
-    a_ids <- sample(ids, length(ids) %/% 2)
-    A <- subset_subjects(real_n, a_ids)
-    B <- subset_subjects(real_n, setdiff(ids, a_ids))
-    m <- mine(A)
-    r <- m$relations
-    e <- evaluate(m, B)
-    r$share_B <- e$share; r$n_B <- e$n
-    r$real <- !is.na(r$share_B) & r$share_B >= HOLD
-    for (s in seq_along(synth)) { e <- evaluate(m, synth[[s]]); r[[paste0("syn", s)]] <- e$share; r[[paste0("n", s)]] <- e$n }
-    r$content <- involves_content(r)
-    r$split <- split
-    results[[split]] <- r
-    cat(label, "split", split, ":", nrow(r), "mined,", sum(r$real), "hold on half B\n")
+  members <- subset_subjects(normalise(real), split$members)
+  held_out <- subset_subjects(normalise(readRDS(file.path(OUT, paste0("real_", label, "_seed1.rds")))$data), split$held_out)
+  m <- mine(members)
+  r <- m$relations
+  e <- evaluate(m, held_out)
+  r$break_B <- 1 - e$share; r$n_B <- e$n
+  for (s in seq_along(synth)) {
+    e <- evaluate(m, synth[[s]])
+    r[[paste0("break", s)]] <- 1 - e$share; r[[paste0("n", s)]] <- e$n
+    r[[paste0("kept", s)]] <- ifelse(r$n_B > 0 & e$n > 0, r[[paste0("break", s)]] <= r$break_B + TOL, NA)
   }
-  res <- do.call(rbind, results)
-  saveRDS(res, file.path(OUT, paste0("check_", label, ".rds")))
+  r$content <- involves_content(r)
+  # Relations between a benchmark replica and a copy of the same domain (XA.XACLAS = CM.CMCLAS
+  # holds only because XA copies CM's records), from the folder's manifest when there is one.
+  manifest <- file.path(dirname(DATA), paste0(basename(DATA), "_manifest.csv"))
+  mf <- if (file.exists(manifest)) utils::read.csv(manifest) else data.frame(dataset = character(), kind = character(), source = character())
+  replicas <- mf$dataset[mf$kind == "replica"]
+  origin <- stats::setNames(mf$source, mf$dataset)[replicas]
+  domain_of <- function(d) sub("^SUPP", "", ifelse(d %in% names(origin), origin[d], d))
+  da <- sub("[. ].*$", "", r$a); db <- sub("[. ].*$", "", r$b)
+  r$copies <- da != db & domain_of(da) == domain_of(db) & (da %in% replicas | db %in% replicas)
+  saveRDS(r, file.path(OUT, paste0("check_", label, ".rds")))
+  kept <- as.matrix(r[grep("^kept", names(r))])
+  scored <- !r$copies & rowSums(is.na(kept)) == 0
+  share <- function(rows) sprintf("%.3f (%s)", mean(colMeans(kept[rows, , drop = FALSE])),
+    paste(sprintf("%.3f", colMeans(kept[rows, , drop = FALSE])), collapse = " "))
+  cat(sprintf("%s: %d relations mined on %d members (support >= %d subjects); %d scored, %d unchecked in held-out or synthetic data, %d replica copies\n",
+    label, nrow(r), length(split$members), SUPPORT, sum(scored), sum(!r$copies & !scored), sum(r$copies)))
+  cat(sprintf("  preserved (break <= held-out + %.2f), mean (seeds): all %s; content %s; timing %s\n", TOL,
+    share(scored), share(scored & r$content), share(scored & !r$content)))
+  for (k in unique(r$kind)) cat(sprintf("  %-12s %5d  %s\n", k, sum(scored & r$kind == k), share(scored & r$kind == k)))
+  if (identical(Sys.getenv("SHOW"), "1")) {
+    lost <- r[scored & rowSums(kept) == 0, ]
+    cat("\nNot preserved in any seed (breaking rate held-out, then per seed):\n")
+    synthetic <- apply(as.matrix(lost[grep("^break[0-9]", names(lost))]), 1, function(z) paste(sprintf("%.3f", z), collapse = " "))
+    writeLines(sort(sprintf("  %s: %s %s %s  %.3f | %s", lost$kind, lost$a, lost$rel, lost$b, lost$break_B, synthetic)))
+  }
 }

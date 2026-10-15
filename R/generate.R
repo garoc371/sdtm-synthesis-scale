@@ -63,7 +63,7 @@ generate_dataset <- function(study, name, built, spine) {
 # design datasets, which hold no subject data.
 study_bundle <- function(study, seed = 1) {
   list(datasets = study$datasets, fits = study$fits, spine = study$spine, supp = study_supp(study), design = study_design(study),
-    seed = seed, created = Sys.time())
+    define = study$source$define, seed = seed, created = Sys.time())
 }
 
 study_supp <- function(study) study$supp %||% study$source$supp

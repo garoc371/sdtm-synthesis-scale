@@ -12,7 +12,8 @@ read_folder <- function(directory) {
 }
 
 # Labels come from the files, or from define.xml item definitions (OIDs of the form
-# IT.<DATASET>.<VARIABLE>) when one is given. Partial ISO dates are imputed (`impute_dates()`).
+# IT.<DATASET>.<VARIABLE>) when one is given, as are its domain keys and code lists for the
+# SDTM rules (`read_define()`). Partial ISO dates are imputed (`impute_dates()`).
 read_source <- function(files, names = basename(files)) {
   ext <- tolower(tools::file_ext(names))
   tables <- which(ext %in% c("xpt", "sas7bdat", "csv"))
@@ -45,7 +46,7 @@ read_source <- function(files, names = basename(files)) {
     })
     x
   })
-  list(data = impute_dates(data), labels = labels)
+  list(data = impute_dates(data), labels = labels, define = if (!is.na(define)) read_define(define))
 }
 
 # ---- Dates ------------------------------------------------------------------------------

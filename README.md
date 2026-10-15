@@ -17,9 +17,9 @@ Options: `synth.cores` (background workers, default up to 8), `synth.cache` (cac
 Loading a study is the only required step. Nothing waits for a confirmation.
 
 - **One policy.** Found rules that reproduce at least the policy share of checked records (90% by default) are accepted in every dataset, the others rejected. The slider on the overview changes the share for the whole study.
-- **Background build.** The source is read in a worker; DM is built first (later starting graphs use its arm), then every other dataset in parallel, largest first: rules found, resolved by the policy, starting graph built, checked and fitted. Once nothing is left to build, the study is sampled and its coherence checked. The app only submits jobs and collects results, so it answers while workers compute.
+- **Background build.** The source is read in a worker; DM is built first (later starting graphs use its arm), then every other dataset in parallel, largest first: rules found, resolved by the policy, starting graph built, checked and fitted. Once nothing is left to build, the study is sampled and checked against the SDTM rules (below). The app only submits jobs and collects results, so it answers while workers compute.
 - **Cache by content.** A dataset's build is stored under a hash of its records, DM's, the code, and what the policy decides for its found rules. Loading the same study again takes seconds; a policy change rebuilds only the datasets where it changes a decision; an edit rebuilds only that dataset.
-- **Exceptions, not approvals.** The board shows every dataset as a tile, the datasets that need a look (a build error, a failed check of the graph, which leaves the dataset out of the generated data, or a failed coherence check), and a ledger of every decision ranked by the number of source records it changes.
+- **Exceptions, not approvals.** The board shows every dataset as a tile, the datasets that need a look (a build error, a failed check of the graph, which leaves the dataset out of the generated data, or a broken SDTM rule), and a ledger of every decision ranked by the number of source records it changes.
 - **Changes by hand.** Any dataset can be opened from a tile or the ledger: rules, variable types, graph, and a comparison of source and synthetic data. A change is marked as made by hand, kept when the policy changes, and rebuilt at once; "Back to the policy" drops it.
 
 Save: the synthetic data (xpt/csv) or a specification bundle (`generate_study(readRDS(file), n, seed)`). The bundle holds model coefficients and the shifted spine of every source subject (arm, record keys, visits, dates), so it is as private as that timing, not more.
@@ -46,7 +46,11 @@ A sampled node is fitted per test and per stage (first record of a series, or a 
 
 ## Record structures
 
-DM has one record per subject. Findings (--TESTCD) and datasets with one record per subject and visit follow a schedule of planned keys: the visit and test, then the categories that best separate repeated records. When these leave records unseparated, a text column that separates 99% of a subject's records and whose values recur across subjects (TULNKID, TRLNKID: T01, NT01, NEW01) is a key whatever its number of values, so the records linking TR to TU come from one donor. Otherwise, a category that every subject has the same number of records of (one DSCAT "DISPOSITION EVENT" each in DS) is planned the same way, and values are modelled per category. Everything else is a count of records per subject. Category values whose per-subject count never varies in the source are coherence checks on the generated data.
+DM has one record per subject. Findings (--TESTCD) and datasets with one record per subject and visit follow a schedule of planned keys: the visit and test, then the categories that best separate repeated records. When these leave records unseparated, a text column that separates 99% of a subject's records and whose values recur across subjects (TULNKID, TRLNKID: T01, NT01, NEW01) is a key whatever its number of values, so the records linking TR to TU come from one donor. Otherwise, a category that every subject has the same number of records of (one DSCAT "DISPOSITION EVENT" each in DS) is planned the same way, and values are modelled per category. Everything else is a count of records per subject.
+
+## SDTM rules
+
+The generated data are checked against a fixed list of SDTMIG rules (`sdtm_rules()`, R/review.R), read from the output datasets and the define.xml alone, never from the fitted specification: one DM record per subject and every subject in DM; the define.xml's domain keys unique; --SEQ unique per subject; --STDTC on or before --ENDTC; --DY equal to the days from RFSTDTC, with no day 0; EX dates within RFXSTDTC to RFXENDTC; DTHFL = Y exactly when DTHDTC is given; every SUPP-- and RELREC record pointing to an existing parent; values in the define.xml's code lists. Dates are compared for order only. The same function runs on the source, so a rule the source already breaks shows as such.
 
 ## Benchmark
 
@@ -55,18 +59,25 @@ DM has one record per subject. Findings (--TESTCD) and datasets with one record 
 - **bench28**: the pilot's DM, EX, LB, MH, QS, SV, VS, AE, CM; pharmaversesdtm's DS, EG, PC, PP, and the ophthalmology and oncology OE, RS, SC, TR, TU; SUPP datasets; the pilot's trial design.
 - **bench72**: bench28 with QS, LB and OE split by category (QSAD, LBCH, OEVA, …) and 34 custom-domain replicas (XA…YA: a domain's records for 70% of its subjects, with its SUPP).
 
-`bench/eval/run.sh <label> [folder]` (default `data/pilot`) builds the study with the app's code, generates 254 subjects for seeds 1–3 and checks them with code kept apart from the app's:
+`bench/eval/run.sh <label> [folder]` (default `data/pilot`) splits the real subjects at random in half (`SPLIT=1`), builds the study from one half (the members) with the app's code, generates as many subjects as there are members for seeds 1–3, and measures them with code kept apart from the app's:
 
-- **App checks**: the coherence checks the app runs itself.
-- **Relations**: mined on half of the real subjects and holding on the other half (date orders, functional dependencies, implications within and between datasets). One fails when, in most seeds (2 of 3), more synthetic subjects (records, for a dependency within a dataset) break it than chance allows at 1% (one-sided binomial test at 5%; one subject of 20 is not counted). Not counted: failures the real data already has as the app reads it (partial dates imputed), and in bench72 relations between a replica and a copy of the same domain (XA.XACLAS = CM.CMCLAS holds because XA copies CM).
-- **Fidelity**: mean total variation distance of categories and Kolmogorov–Smirnov distance of numbers, per variable.
+- **SDTM rules** (`rules.R`): every rule above, on the members' real data and each seed. Required: a rule the synthetic data break more often than the members' data is a failure of the generator; one the source breaks as often is the source's.
+- **Relation score** (`check.R`): relations held by at least `SUPPORT` members (5 by default) are mined on the members: date orders, functional dependencies, implications within and between datasets. A relation is preserved when the share of synthetic subjects breaking it is at most the held-out half's share plus `TOL` (0.05), so the bar is how well a fresh real sample keeps it. Reported: the share preserved, overall, for content and timing, and per kind; `SHOW=1` lists the relations not preserved in any seed.
+- **Fidelity** (`fidelity.R`): mean total variation distance of categories and Kolmogorov–Smirnov distance of numbers, per variable.
+- **Privacy** (`privacy.R`), on the same split. Timeline: a subject's dates as days from their first visit. Correct link: synthetic subjects whose timeline matches exactly one member, that member being their donor. Membership accuracy: a real subject is called a member when a synthetic subject has their timeline, balanced over members and held out. Singleton values: text values held by one member and no held-out subject, and the share reproduced. Exact records: per dataset, synthetic records equal to a member's record and to a held-out subject's, without identifiers and --SEQ.
 
-| | datasets | app checks failed | relations failing | mean TVD | mean KS |
-|---|---|---|---|---|---|
-| pilot | 10 | 0 of 127 | 1 | 0.049 | 0.036 |
-| bench28 | 28 | 0 of 255 | 17 | 0.039 | 0.029 |
-| bench72 | 72 | 0 of 761 | 56 | 0.049 | 0.034 |
+bench28, 153 members, seeds 1–3:
 
-Seeds 1–3. On bench28 over 12 seeds, each set of three (1–3, 4–6, 7–9, 10–12) gives 16 or 17 failing relations, 16 of them in all four. Counted as any share below 99%, the same runs gave 21 to 77 per seed and sets of six shared half their failures (pilot 14, bench28 58, bench72 228 on seeds 1–3). With 8 workers bench72 builds in 26 s; a 2,540-subject study generated from bench28 (3.3 million records, QS 1 million) builds in 126 s and generates in 81 s; its longest job is QS.
+| | |
+|---|---|
+| SDTM rules broken | 12 of 172; 1 more often than the members' data: MH keys USUBJID, MHTERM, MHSTDTC not unique in 398 of 919 records (MHTERM is not generated) |
+| relations | 43,781 mined, 43,669 scored; preserved 1.000 (dates 0.999); not preserved in any seed: CM.CMCLAS=SYSTEMIC HORMONAL PREPARATIONS ends by RFXENDTC (held out 0.000, seeds 0.09–0.20) |
+| fidelity | mean TVD 0.044, KS 0.033 |
+| correct link | 0.941 (the members unique on their timeline) |
+| membership accuracy | 0.941 (members found 1.000, held out matched 0.118) |
+| singleton values reproduced | 0.199 of 4,622 |
+| exact records, member / held out | EX, SE, SV, TU, SUPP 1.000 / 0.24–1.000; DS 0.84 / 0.40; QS 0.75 / 0.40; LB 0.16 / 0.08; AE, CM, DM, MH under 0.01 |
+
+The source's own failures: CM keys not unique (3,557 of 4,132), DS and SC values outside the pilot's code lists (pharmaversesdtm's DSDECOD, DSCAT, SCCAT), --DY not from RFSTDTC in EG, RS, TR, TU (studies spliced with another RFSTDTC), OESEQ repeated, 4 EX records after RFXENDTC, one repeated SV visit. The held-out half breaks 1.0% of relations at all; synthetic seed 1 breaks 0.3%: the synthetic data keep the members' relations more tightly than a fresh real sample does. With 8 workers bench72 builds in 26 s; a 2,540-subject study generated from bench28 (3.3 million records, QS 1 million) builds in 126 s and generates in 81 s; its longest job is QS.
 
 Data: [CDISC pilot project](https://github.com/cdisc-org/sdtm-adam-pilot-project), study CDISCPILOT01.
