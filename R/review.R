@@ -10,23 +10,23 @@
 coherence_checks <- function(study, generated) sdtm_rules(output_datasets(study, generated), study$define)
 
 # The same rules on the source, read once on loading: a generated record that breaks a rule
-# the source breaks too follows its donor, and only the others point to the generator.
+# the source breaks as often follows its donor, and only the others point to the generator.
 source_checks <- function(study) {
   given <- list(supp = study_supp(study), design = study_design(study), define = study$source$define)
   coherence_checks(given, list(data = study$source$data))
 }
 
 # Each rule's category, with what it checks, and where to look when the generated data break
-# a rule the source keeps.
+# a rule more often than the source.
 CHECK_CATEGORIES <- list(
   keys = list(label = "Keys", about = "one record per subject in DM, per domain key of the define.xml and per --SEQ within a subject",
-    fix = "Open the dataset and look at how its key columns are made (Variables tab): a key column that is sampled, not copied from the donor, can repeat."),
+    fix = "Open the dataset's Variables tab: a key column that is sampled or not generated, rather than copied from the donor, can repeat."),
   subjects = list(label = "Subjects", about = "every record's subject is in DM",
     fix = "No setting changes this: subjects are copied from DM. Report it with the examples."),
   dates = list(label = "Date order", about = "a record's start date is on or before its end date",
     fix = "No setting changes this: dates are copied from the donor. Report it with the examples."),
   days = list(label = "Study days", about = "--DY is the date minus RFSTDTC, plus one from day 1 on (there is no day 0)",
-    fix = "No setting changes this: dates and study days are copied from the donor. Report it with the examples."),
+    fix = "Permuting the visit gaps moves dates but keeps a study day that is planned per visit, so the two drift apart; synth.permute_gaps = FALSE keeps the donor's days. Otherwise report it with the examples."),
   exposure = list(label = "Exposure", about = "EX dates fall within the subject's first and last exposure dates",
     fix = "No setting changes this: dates are copied from the donor. Report it with the examples."),
   death = list(label = "Death", about = "DTHFL is Y exactly when DTHDTC is given",
@@ -37,6 +37,10 @@ CHECK_CATEGORIES <- list(
     fix = "Open the dataset and look at how the column is made (Variables tab): sampled values and rule results come from the source.")
 )
 
+# A broken rule counts as inherited when the source breaks it too and the generated share of
+# records breaking it is at most this much above the source's.
+INHERITED_MARGIN <- 0.05
+
 # Generated checks with the source's result for the same rule: SourceFailed is NA when the
 # source has nothing to check.
 with_source <- function(checks, source) {
@@ -44,7 +48,10 @@ with_source <- function(checks, source) {
   checks$SourceChecked <- source$Checked[i]
   checks$SourceFailed <- source$Failed[i]
   checks$SourceProblems <- source$Problems[i]
-  checks$Inherited <- checks$Status == "failed" & !is.na(i) & source$Failed[i] > 0
+  share <- checks$Failed / checks$Checked
+  source_share <- checks$SourceFailed / checks$SourceChecked
+  checks$Inherited <- checks$Status == "failed" & !is.na(i) & checks$SourceFailed > 0 &
+    share <= source_share + INHERITED_MARGIN
   checks
 }
 
@@ -114,7 +121,7 @@ sdtm_rules <- function(data, define = NULL) {
     if (length(keys) > 1 && all(keys %in% names(x))) {
       keys <- setdiff(keys, "STUDYID")
       k <- do.call(paste, c(key_text[[name]][keys], sep = " / "))
-      named <- do.call(paste, c(Map(function(v, x) paste(v, x), keys, key_text[[name]][keys]), sep = ", "))
+      named <- do.call(paste, c(Map(function(v, x) paste(v, ifelse(is.na(x) | x == "", "(empty)", x)), keys, key_text[[name]][keys]), sep = ", "))
       add(name, "keys", paste("One record per", paste(keys, collapse = ", ")), !duplicated(k), paste(named, "occurs again"))
     }
     if ("USUBJID" %in% names(x)) for (v in grep("^[A-Z]{2}SEQ$", names(x), value = TRUE))

@@ -76,7 +76,8 @@ dataset_server <- function(id, b, tick, current, change, step, notify) {
     })
 
     # Failed checks of the graph (the dataset is then left out of generation), a failed
-    # build, and the SDTM rules the generated data break: those the source keeps first.
+    # build, and the SDTM rules the generated data break: those broken more often than in the
+    # source first.
     output$problems <- renderUI({
       x <- req(state())
       problems <- rbind(
@@ -363,17 +364,26 @@ plot_theme <- function() {
     )
 }
 
-# One broken SDTM rule: how many generated records break it, whether the source does too,
-# what to do and the first records.
+# One broken SDTM rule: how many generated records break it, how often the source does, what
+# to do and the first records.
 broken_rule <- function(r) {
   category <- CHECK_CATEGORIES[[r$Category]]
+  source_breaks <- !is.na(r$SourceFailed) && r$SourceFailed > 0
   source <- if (is.na(r$SourceFailed)) {
     "The source has no records to check."
   } else if (r$Inherited) {
     sprintf(
-      "The source breaks it too, in %s of %s records, and each generated subject copies the records of a source subject.",
+      "The source breaks it about as often, in %s of %s records, and each generated subject copies the records of a source subject.",
       big(r$SourceFailed),
       big(r$SourceChecked)
+    )
+  } else if (source_breaks) {
+    sprintf(
+      "The source breaks it in only %s of %s records (%s, against %s here), so most of these come from generation.",
+      big(r$SourceFailed),
+      big(r$SourceChecked),
+      share_text(r$SourceFailed / r$SourceChecked),
+      share_text(r$Failed / r$Checked)
     )
   } else {
     "The source keeps it, so generation broke it."
@@ -385,7 +395,7 @@ broken_rule <- function(r) {
       strong(r$Check),
       badge(
         if (r$Inherited) NA else "danger",
-        if (r$Inherited) "as in the source" else "new"
+        if (r$Inherited) "as in the source" else if (source_breaks) "more than the source" else "new"
       )
     ),
     p(
@@ -404,6 +414,6 @@ broken_rule <- function(r) {
       }
     ),
     hint("Generated: ", r$Problems),
-    if (r$Inherited) hint("Source: ", r$SourceProblems)
+    if (source_breaks) hint("Source: ", r$SourceProblems)
   )
 }

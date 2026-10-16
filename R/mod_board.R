@@ -421,14 +421,14 @@ attention_list <- function(x) {
       class = "alert alert-success mb-0",
       icon("circle-check"),
       sprintf(
-        " Nothing new. %d datasets built and generated; they break no SDTM rule the source keeps.",
+        " Nothing new. %d datasets built and generated; none breaks an SDTM rule more often than the source.",
         x$built
       )
     ))
   }
   if (is.null(x$rows)) {
     return(hint(
-      "Nothing so far. Datasets appear here when a check of their graph fails, or their generated data break an SDTM rule the source keeps."
+      "Nothing so far. Datasets appear here when a check of their graph fails, or their generated data break an SDTM rule more often than the source."
     ))
   }
   div(
@@ -450,7 +450,7 @@ attention_list <- function(x) {
   )
 }
 
-# Datasets that break rules their source breaks too.
+# Datasets that break rules about as often as their source.
 inherited_note <- function(names) {
   if (!length(names)) {
     return(NULL)
@@ -461,7 +461,7 @@ inherited_note <- function(names) {
     lapply(names, function(name) {
       input_button("open_dataset", name, class = "btn btn-link", name)
     }),
-    " break SDTM rules that the source breaks too. Generated subjects copy the records of a source subject, so these come with them."
+    " break SDTM rules about as often as the source does. Generated subjects copy the records of a source subject, so these come with them."
   )
 }
 
@@ -487,7 +487,7 @@ checked_rules <- function(checks) {
         new <- sum(broken & !x$Inherited)
         paste0(
           sprintf("%s; %d broken as in the source", plural(nrow(x), "rule"), sum(x$Inherited)),
-          if (new) sprintf(", %d new", new)
+          if (new) sprintf(", %d more often than in the source", new)
         )
       }
       tags$li(
@@ -500,7 +500,7 @@ checked_rules <- function(checks) {
 }
 
 # Datasets left out of generation (their build failed) or whose generated data break an
-# SDTM rule the source keeps, with the first problem.
+# SDTM rule more often than the source, with the first problem.
 attention_rows <- function(b, s) {
   if (is.null(s)) {
     return(NULL)
@@ -524,8 +524,8 @@ attention_rows <- function(b, s) {
       )
     } else if (r$coherence_failed > 0) {
       c(
-        if (r$coherence_failed == 1) "Breaks a rule the source keeps" else
-          sprintf("Breaks %d rules the source keeps", r$coherence_failed),
+        if (r$coherence_failed == 1) "Breaks an SDTM rule more often than the source" else
+          sprintf("Breaks %d SDTM rules more often than the source", r$coherence_failed),
         problem(b$coherence, r$dataset)
       )
     }
