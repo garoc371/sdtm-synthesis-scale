@@ -106,6 +106,95 @@ draw_spine <- function(spine, donors, ids) {
   })
 }
 
+# After generation, the gaps between a subject's visits are permuted among the synthetic
+# subjects who have the same two visits in a row (screening to baseline, week 2 to week 4), so
+# a subject no longer has their donor's visit days. Every date of a subject moves with the
+# visits around it, through one map for all datasets, placed so that day 1 (RFSTDTC, the spine
+# anchor) stays: a date on a visit stays on that visit; a date between two visits keeps its
+# distance to the nearer one (on a tie, the one nearer day 1) when the gap grows, and when it shrinks as
+# long as that distance is within a quarter of the new gap, the dates in the middle being
+# squeezed; a date before the first or after the last visit keeps its distance to it. A gap
+# shrinks only as far as the subject's dates in it still fall on different days, so dates keep
+# their order, dates on one day stay on one day and dates on different days stay apart. A
+# study day moves with its date when it counts from RFSTDTC (in 99% of records); one that does
+# not, a planned day per visit, stays. synth.permute_gaps = FALSE keeps the donors' days.
+permute_gaps <- function(data, anchor = as.Date(getOption("synth.anchor", SPINE_ANCHOR))) {
+  sv <- data[[VISIT_HUB]]
+  date <- if (!is.null(sv)) main_date(VISIT_HUB, names(sv)) else NA
+  if (!getOption("synth.permute_gaps", TRUE) || is.na(date) || is.null(data$DM)) return(data)
+  sv <- sv[as.numeric(sv$VISITNUM) %in% progress_visits(sv) & !is.na(sv[[date]]), , drop = FALSE]
+  points <- data.frame(USUBJID = sv$USUBJID, visit = as.character(sv$VISITNUM), day = as.numeric(sv[[date]]))
+  points <- points[order(points$USUBJID, points$day), , drop = FALSE]
+  points <- points[!duplicated(points[c("USUBJID", "visit")]), , drop = FALSE]
+  first <- !duplicated(points$USUBJID)
+  key <- paste(c("", points$visit[-nrow(points)]), points$visit)
+  gap <- c(0, diff(points$day))
+  gap[!first] <- stats::ave(gap[!first], key[!first], FUN = function(g) g[sample.int(length(g))])
+  dated <- Filter(function(x) "USUBJID" %in% names(x), data)
+  days <- do.call(rbind, lapply(dated, function(x) do.call(rbind, lapply(Filter(function(v) inherits(v, "Date"), x),
+    function(v) data.frame(USUBJID = x$USUBJID, day = as.numeric(v))))))
+  days <- split(days$day[!is.na(days$day)], days$USUBJID[!is.na(days$day)])
+  visits <- split(data.frame(old = points$day, gap), factor(points$USUBJID, unique(points$USUBJID)))
+  maps <- do.call(rbind, Map(function(s, p) {
+    m <- day_map(c(days[[s]], as.numeric(anchor)), p$old, p$gap, as.numeric(anchor))
+    m$new <- m$new + as.numeric(anchor) - m$new[m$old == as.numeric(anchor)]
+    data.frame(USUBJID = s, m)
+  }, names(visits), visits))
+  mapped <- paste(maps$USUBJID, maps$old)
+  lapply(data, function(x) {
+    columns <- names(Filter(function(v) inherits(v, "Date"), x))
+    if (!"USUBJID" %in% names(x) || !length(columns)) return(x)
+    start <- as.numeric(data$DM$RFSTDTC[match(x$USUBJID, data$DM$USUBJID)])
+    for (v in columns) {
+      old <- as.numeric(x[[v]])
+      new <- maps$new[match(paste(x$USUBJID, old), mapped)]
+      new[is.na(new)] <- old[is.na(new)]
+      x[[v]] <- as.Date(new, origin = "1970-01-01")
+      day <- sub("DTC$", "DY", v)
+      if (day != v && is.numeric(x[[day]]) && mean(old - start + (old >= start) == x[[day]], na.rm = TRUE) >= 0.99) {
+        moved <- x[[day]] + new - old
+        x[[day]] <- moved + ifelse(x[[day]] < 0 & moved >= 0, 1, ifelse(x[[day]] > 0 & moved <= 0, -1, 0))
+      }
+    }
+    x
+  })
+}
+
+# One subject's map: their days (all dates, as numbers), and their visit days (old, in order)
+# with the permuted gaps that lead to them; each gap is widened to hold the days inside it.
+day_map <- function(days, old, gap, anchor) {
+  days <- sort(unique(c(days, old)))
+  g <- diff(old)
+  inner <- vapply(seq_along(g), function(j) sum(days > old[j] & days < old[j + 1]), 0)
+  g2 <- ifelse(g == 0, 0, pmax(gap[-1], inner + 1))
+  new <- old[1] + c(0, cumsum(g2))
+  m <- length(old)
+  i <- findInterval(days, old)
+  out <- days + ifelse(i == 0, new[1] - old[1], new[m] - old[m])
+  on <- days %in% old
+  out[on] <- new[match(days[on], old)]
+  for (j in which(inner > 0)) {
+    k <- which(days > old[j] & days < old[j + 1])
+    out[k] <- new[j] + inside_days(days[k] - old[j], g[j], g2[j], abs(old[j + 1] - anchor) < abs(old[j] - anchor))
+  }
+  data.frame(old = days, new = out)
+}
+
+# Where the days a (in order, strictly between two visits g days apart) go when the visits
+# are g2 days apart; there are fewer than g2 of them. A day halfway keeps its distance to the
+# later visit when `later`.
+inside_days <- function(a, g, g2, later) {
+  if (g2 >= g) return(ifelse(a < g - a | a == g - a & !later, a, g2 - (g - a)))
+  l <- g2 / 4
+  t <- round(ifelse(a <= l, a, ifelse(g - a <= l, g2 - (g - a), l + (a - l) * (g2 - 2 * l) / (g - 2 * l))))
+  t <- pmin(pmax(t, 1), g2 - 1)
+  n <- length(t)
+  for (i in seq_len(n)[-1]) t[i] <- max(t[i], t[i - 1] + 1)
+  t[n] <- min(t[n], g2 - 1)
+  for (i in rev(seq_len(n))[-1]) t[i] <- min(t[i], t[i + 1] - 1)
+  t
+}
+
 # The visits that mark how far a subject went, in number order: a visit counts when most of
 # its subjects attended the latest counted visit with at least as many subjects. Visits after
 # an early stop (AE FOLLOW-UP 101, RETRIEVAL 201) mostly lack the last scheduled visit, so a
