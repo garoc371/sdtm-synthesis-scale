@@ -301,7 +301,8 @@ generation_bundle <- function(b) {
     ds$include <- ds$name %in% names
     ds
   })
-  list(datasets = datasets, fits = study$fits[names], spine = study$spine, supp = study_supp(study), design = study_design(study))
+  list(datasets = datasets, fits = study$fits[names], spine = study$spine, supp = study_supp(study), design = study_design(study),
+    define = study$source$define)
 }
 
 idle <- function(b) !length(b$queue) && !any(vapply(b$running, `[[`, "", "kind") %in% c("load", "build"))

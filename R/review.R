@@ -1,54 +1,148 @@
-# Review of generated data: coherence checks that must hold exactly, and comparisons with
-# the source that show how closely the models reproduce it.
+# Review of generated data: SDTM rules that must hold exactly, and comparisons with the
+# source that show how closely the models reproduce it.
 
-# Each check lists the failing record numbers of its dataset.
-coherence_checks <- function(study, generated) {
-  data <- generated$data
-  rows <- list(check_row("DM", "One record per subject", which(duplicated(data$DM$USUBJID))))
-  for (name in names(data)) {
-    ds <- study$datasets[[name]]
-    x <- data[[name]]
-    frame <- dataset_frame(study, name, data)
-    sequence <- names(Filter(function(r) r$op == "sequence", accepted_rules(ds)))
-    keys <- intersect(c("USUBJID", if (isTRUE(ds$structure$unique)) ds$structure$keys else c(ds$structure$id, sequence)[1]), names(x))
-    starts <- grep("STDTC$", names(x), value = TRUE)
-    ends <- sub("STDTC$", "ENDTC", starts)
-    subjects <- unique(x$USUBJID)
-    fixed <- ds$fixed
-    rows <- c(rows,
-      if (name != "DM") list(check_row(name, "Every subject is in DM", which(!x$USUBJID %in% data$DM$USUBJID))),
-      if (name != "DM" && length(keys) > 1) list(check_row(name, paste("Unique", paste(keys, collapse = " + ")), which(duplicated(x[keys])))),
-      # Problems here name subjects, not records.
-      if (length(fixed)) list(check_row(name, paste("Every subject has", paste(fixed$records, fixed$variable, fixed$value, collapse = "; ")),
-        unlist(lapply(seq_len(nrow(fixed)), function(i) {
-          n <- tabulate(match(x$USUBJID[format_value(x[[fixed$variable[i]]]) %in% fixed$value[i]], subjects), length(subjects))
-          sprintf("%s has %d %s", subjects, n, fixed$value[i])[n != fixed$records[i]]
-        })))),
-      lapply(accepted_rules(ds), function(rule) check_row(name, paste0(rule$target, " = ", rule_label(rule)),
-        which(!same_value(tryCatch(rule_values(ds, rule, frame), error = function(e) rep(NA, nrow(frame))), x[[rule$target]])))),
-      Map(function(start, end) check_row(name, sprintf("%s on or before %s", start, end), which(x[[start]] > x[[end]])),
-        starts[ends %in% names(x)], ends[ends %in% names(x)]),
-      implication_checks(study, name, x, frame))
+# ---- SDTM rules -------------------------------------------------------------------------
+
+# A fixed list of SDTMIG rules, read from the output datasets (SUPP-- unfolded, trial design
+# included) and the define.xml's domain keys and code lists alone. Nothing comes from the
+# fitted specification, so the list does not restate the generator, and it runs on source
+# and synthetic data alike. Dates are compared for order only, never for their values.
+coherence_checks <- function(study, generated) sdtm_rules(output_datasets(study, generated), study$define)
+
+# Domain keys (def:DomainKeys) and enumerated code lists per dataset and variable. Code lists
+# without items name an external dictionary (MedDRA, WHODrug) and are left out.
+read_define <- function(file) {
+  xml <- xml2::xml_ns_strip(xml2::read_xml(file))
+  attr_of <- function(node, name) {
+    value <- xml2::xml_attr(node, name)
+    ifelse(is.na(value), xml2::xml_attr(node, paste0("def:", name)), value)
   }
-  # Supplemental qualifiers are generated as columns of their parent: once unfolded they
-  # must point to parent records. Trial design datasets are copied unchanged.
-  output <- output_datasets(study, generated)
-  design <- study_design(study)
-  rows <- c(rows, list(supp_checks(output, study_supp(study))),
-    lapply(names(design), function(n) check_row(n, "Copied unchanged", if (!identical(output[[n]], design[[n]])) 1L)))
-  do.call(rbind, rows)
+  groups <- xml2::xml_find_all(xml, "//ItemGroupDef")
+  names <- xml2::xml_attr(groups, "Name")
+  keys <- stats::setNames(lapply(attr_of(groups, "DomainKeys"), function(k) if (!is.na(k)) trimws(strsplit(k, ",")[[1]])), names)
+  items <- xml2::xml_find_all(xml, "//ItemDef[CodeListRef]")
+  item_list <- stats::setNames(xml2::xml_attr(xml2::xml_find_first(items, "CodeListRef"), "CodeListOID"), xml2::xml_attr(items, "OID"))
+  item_name <- stats::setNames(xml2::xml_attr(items, "Name"), xml2::xml_attr(items, "OID"))
+  lists <- xml2::xml_find_all(xml, "//CodeList")
+  codes <- stats::setNames(lapply(lists, function(l) xml2::xml_attr(xml2::xml_find_all(l, "CodeListItem|EnumeratedItem"), "CodedValue")),
+    xml2::xml_attr(lists, "OID"))
+  numeric <- stats::setNames(xml2::xml_attr(lists, "DataType") %in% c("integer", "float"), xml2::xml_attr(lists, "OID"))
+  codelists <- do.call(rbind, lapply(seq_along(groups), function(i) {
+    refs <- xml2::xml_attr(xml2::xml_find_all(groups[[i]], "ItemRef"), "ItemOID")
+    refs <- refs[refs %in% names(item_list) & item_list[refs] %in% names(codes)]
+    refs <- refs[lengths(codes[item_list[refs]]) > 0]
+    if (length(refs)) data.frame(dataset = names[i], variable = unname(item_name[refs]), codelist = unname(item_list[refs]))
+  }))
+  list(keys = Filter(length, keys), codelists = codelists, codes = codes, numeric = numeric)
 }
 
-# Implications of sampled categories (see spine.R), at the node's level rows.
-implication_checks <- function(study, name, x, frame) {
-  ds <- study$datasets[[name]]
-  fits <- study$fits[[name]]$nodes
-  lapply(names(Filter(function(f) !is.null(f$implications), fits)), function(v) {
-    level <- if (name == "DM") "record" else ds$levels[[v]]
-    rows <- level_rows(frame, level, ds$structure)
-    check_row(name, sprintf("%s keeps its %d implications", v, nrow(fits[[v]]$implications)),
-      rows[implication_violations(fits[[v]]$implications, x[[v]][rows], frame[rows, , drop = FALSE])])
+# One row per rule and dataset: records checked, records failing and the first examples.
+sdtm_rules <- function(data, define = NULL) {
+  as_day <- function(x) if (inherits(x, "Date")) x else {
+    x <- substr(as.character(x), 1, 10)
+    as.Date(ifelse(grepl("^\\d{4}-\\d{2}-\\d{2}$", x), x, NA))
+  }
+  text <- function(x) ifelse(is.na(x), "", trimws(as.character(x)))
+  # Keys compare the values as given, partial dates included.
+  key_text <- lapply(data, function(x) as.data.frame(lapply(x, text), check.names = FALSE))
+  data <- lapply(data, function(x) {
+    x <- as.data.frame(x)
+    for (v in grep("DTC$", names(x), value = TRUE)) x[[v]] <- as_day(x[[v]])
+    x
   })
+  dm <- data$DM
+  at_dm <- function(x, v) if (v %in% names(dm)) dm[[v]][match(x$USUBJID, dm$USUBJID)] else rep(NA, nrow(x))
+  rows <- list()
+  # ok: TRUE kept, FALSE broken, NA not checked; detail names each record.
+  add <- function(dataset, check, ok, detail) {
+    if (!any(!is.na(ok))) return()
+    bad <- which(!is.na(ok) & !ok)
+    shown <- paste(utils::head(detail[bad], 3), collapse = "; ")
+    if (length(bad) > 3) shown <- sprintf("%s (+%d more)", shown, length(bad) - 3)
+    rows[[length(rows) + 1]] <<- data.frame(Dataset = dataset, Check = check, Status = if (length(bad)) "failed" else "ok",
+      Problems = shown, Checked = sum(!is.na(ok)), Failed = length(bad), stringsAsFactors = FALSE)
+  }
+  subject <- function(x) if ("USUBJID" %in% names(x)) x$USUBJID else rep("", nrow(x))
+  for (name in names(data)) {
+    x <- data[[name]]
+    if (!nrow(x)) next
+    who <- subject(x)
+    # Keys: one DM record per subject, every subject in DM, the define.xml's domain keys,
+    # and --SEQ unique within a subject.
+    if (name == "DM") add(name, "One record per subject", !duplicated(x$USUBJID), paste(who, "repeated"))
+    else if ("USUBJID" %in% names(x) && !is.null(dm)) add(name, "Subject is in DM", ifelse(is.na(x$USUBJID), NA, x$USUBJID %in% dm$USUBJID), paste(who, "not in DM"))
+    keys <- define$keys[[name]]
+    if (length(keys) > 1 && all(keys %in% names(x))) {
+      keys <- setdiff(keys, "STUDYID")
+      k <- do.call(paste, c(key_text[[name]][keys], sep = " / "))
+      add(name, paste("Unique", paste(keys, collapse = ", ")), !duplicated(k), paste(k, "repeated"))
+    }
+    if ("USUBJID" %in% names(x)) for (v in grep("^[A-Z]{2}SEQ$", names(x), value = TRUE))
+      add(name, paste(v, "unique per subject"), !is.na(x[[v]]) & !duplicated(x[c("USUBJID", v)]), paste(who, v, x[[v]], "repeated"))
+    # Order of dates within a record.
+    for (start in grep("STDTC$", names(x), value = TRUE)) {
+      end <- sub("STDTC$", "ENDTC", start)
+      if (end %in% names(x)) add(name, sprintf("%s on or before %s", start, end), ifelse(is.na(x[[start]]) | is.na(x[[end]]), NA, x[[start]] <= x[[end]]),
+        sprintf("%s %s %s after %s %s", who, start, x[[start]], end, x[[end]]))
+    }
+    # Study days: date minus RFSTDTC, plus one on or after it (no day 0).
+    for (v in grep("^[A-Z]{2}(ST|EN)?DY$", names(x), value = TRUE)) {
+      date <- sub("DY$", "DTC", v)
+      if (!date %in% names(x) || !"RFSTDTC" %in% names(dm)) next
+      days <- as.numeric(x[[date]] - at_dm(x, "RFSTDTC"))
+      expected <- days + (days >= 0)
+      add(name, sprintf("%s from %s and RFSTDTC", v, date), ifelse(is.na(x[[v]]) | is.na(days), NA, x[[v]] == expected),
+        sprintf("%s %s %s, dates give %s", who, v, x[[v]], expected))
+    }
+  }
+  # Exposure within the subject's first and last exposure dates.
+  ex <- data$EX
+  if (!is.null(ex) && all(c("RFXSTDTC", "RFXENDTC") %in% names(dm))) {
+    first <- at_dm(ex, "RFXSTDTC"); last <- at_dm(ex, "RFXENDTC")
+    within <- function(d) ifelse(is.na(d), NA, (is.na(first) | d >= first) & (is.na(last) | d <= last) & !(is.na(first) & is.na(last)))
+    ok <- Reduce(function(a, b) ifelse(is.na(a), b, ifelse(is.na(b), a, a & b)), lapply(intersect(c("EXSTDTC", "EXENDTC"), names(ex)), function(v) within(ex[[v]])))
+    add("EX", "EX dates within RFXSTDTC to RFXENDTC", ok, sprintf("%s EX %s to %s, RFX %s to %s", ex$USUBJID, text(ex$EXSTDTC), text(ex$EXENDTC), text(first), text(last)))
+  }
+  if (!is.null(dm) && all(c("DTHFL", "DTHDTC") %in% names(dm)))
+    add("DM", "DTHFL = Y exactly when DTHDTC is given", (dm$DTHFL %in% "Y") == !is.na(dm$DTHDTC),
+      sprintf("%s DTHFL %s, DTHDTC %s", dm$USUBJID, text(dm$DTHFL), text(dm$DTHDTC)))
+  # SUPP-- and RELREC records name their parent by RDOMAIN, USUBJID and IDVAR = IDVARVAL.
+  for (name in c(grep("^SUPP", names(data), value = TRUE), intersect("RELREC", names(data)))) {
+    s <- data[[name]]
+    if (!nrow(s) || !"USUBJID" %in% names(s)) next
+    domain <- if ("RDOMAIN" %in% names(s)) s$RDOMAIN else rep(sub("^SUPP", "", name), nrow(s))
+    idvar <- if ("IDVAR" %in% names(s)) s$IDVAR else rep(NA, nrow(s))
+    value <- trimws(as.character(if ("IDVARVAL" %in% names(s)) s$IDVARVAL else rep(NA, nrow(s))))
+    ok <- rep(NA, nrow(s))
+    for (g in unique(paste(domain, idvar))) {
+      i <- which(paste(domain, idvar) == g & !is.na(s$USUBJID))
+      if (!length(i)) next
+      p <- data[[domain[i[1]]]] %||% data[[sub("^SUPP", "", name)]]
+      v <- idvar[i[1]]
+      ok[i] <- if (is.null(p)) FALSE else if (is.na(v) || !nzchar(v)) s$USUBJID[i] %in% p$USUBJID
+        else if (!v %in% names(p)) FALSE
+        else {
+          parent <- p[[v]]
+          given <- if (is.numeric(parent)) suppressWarnings(as.numeric(value[i])) else if (inherits(parent, "Date")) as_day(value[i]) else value[i]
+          paste(s$USUBJID[i], given) %in% paste(p$USUBJID, if (is.character(parent)) trimws(parent) else parent)
+        }
+    }
+    add(name, "Points to an existing parent record", ok, sprintf("%s %s %s = %s not found", s$USUBJID, domain, idvar, value))
+  }
+  # Controlled terminology: values in the define.xml code list, where the source names one.
+  cl <- define$codelists
+  for (i in seq_len(NROW(cl))) {
+    x <- data[[cl$dataset[i]]]
+    v <- cl$variable[i]
+    if (is.null(x) || !v %in% names(x)) next
+    codes <- define$codes[[cl$codelist[i]]]
+    y <- x[[v]]
+    ok <- if (isTRUE(define$numeric[[cl$codelist[i]]])) suppressWarnings(as.numeric(as.character(y))) %in% suppressWarnings(as.numeric(codes))
+      else trimws(as.character(y)) %in% codes
+    add(cl$dataset[i], sprintf("%s in code list %s", v, cl$codelist[i]), ifelse(is.na(y), NA, ok), sprintf("%s %s = %s", subject(x), v, text(y)))
+  }
+  if (length(rows)) do.call(rbind, rows)
+  else data.frame(Dataset = character(), Check = character(), Status = character(), Problems = character(), Checked = integer(), Failed = integer())
 }
 
 # ---- Comparisons ----------------------------------------------------------------------
