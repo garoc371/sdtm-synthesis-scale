@@ -9,6 +9,45 @@
 # and synthetic data alike. Dates are compared for order only, never for their values.
 coherence_checks <- function(study, generated) sdtm_rules(output_datasets(study, generated), study$define)
 
+# The same rules on the source, read once on loading: a generated record that breaks a rule
+# the source breaks too follows its donor, and only the others point to the generator.
+source_checks <- function(study) {
+  given <- list(supp = study_supp(study), design = study_design(study), define = study$source$define)
+  coherence_checks(given, list(data = study$source$data))
+}
+
+# Each rule's category, with what it checks, and where to look when the generated data break
+# a rule the source keeps.
+CHECK_CATEGORIES <- list(
+  keys = list(label = "Keys", about = "one record per subject in DM, per domain key of the define.xml and per --SEQ within a subject",
+    fix = "Open the dataset and look at how its key columns are made (Variables tab): a key column that is sampled, not copied from the donor, can repeat."),
+  subjects = list(label = "Subjects", about = "every record's subject is in DM",
+    fix = "No setting changes this: subjects are copied from DM. Report it with the examples."),
+  dates = list(label = "Date order", about = "a record's start date is on or before its end date",
+    fix = "No setting changes this: dates are copied from the donor. Report it with the examples."),
+  days = list(label = "Study days", about = "--DY is the date minus RFSTDTC, plus one from day 1 on (there is no day 0)",
+    fix = "No setting changes this: dates and study days are copied from the donor. Report it with the examples."),
+  exposure = list(label = "Exposure", about = "EX dates fall within the subject's first and last exposure dates",
+    fix = "No setting changes this: dates are copied from the donor. Report it with the examples."),
+  death = list(label = "Death", about = "DTHFL is Y exactly when DTHDTC is given",
+    fix = "Open DM and look at how DTHFL is made (Rules and Variables tabs)."),
+  links = list(label = "Parent records", about = "SUPP-- and RELREC records point to a record that exists",
+    fix = "No setting changes this: the links are made when the data are written. Report it with the examples."),
+  codes = list(label = "Code lists", about = "values are in the define.xml's code list for the variable",
+    fix = "Open the dataset and look at how the column is made (Variables tab): sampled values and rule results come from the source.")
+)
+
+# Generated checks with the source's result for the same rule: SourceFailed is NA when the
+# source has nothing to check.
+with_source <- function(checks, source) {
+  i <- match(paste(checks$Dataset, checks$Check), paste(source$Dataset, source$Check))
+  checks$SourceChecked <- source$Checked[i]
+  checks$SourceFailed <- source$Failed[i]
+  checks$SourceProblems <- source$Problems[i]
+  checks$Inherited <- checks$Status == "failed" & !is.na(i) & source$Failed[i] > 0
+  checks
+}
+
 # Domain keys (def:DomainKeys) and enumerated code lists per dataset and variable. Code lists
 # without items name an external dictionary (MedDRA, WHODrug) and are left out.
 read_define <- function(file) {
@@ -54,12 +93,12 @@ sdtm_rules <- function(data, define = NULL) {
   at_dm <- function(x, v) if (v %in% names(dm)) dm[[v]][match(x$USUBJID, dm$USUBJID)] else rep(NA, nrow(x))
   rows <- list()
   # ok: TRUE kept, FALSE broken, NA not checked; detail names each record.
-  add <- function(dataset, check, ok, detail) {
+  add <- function(dataset, category, check, ok, detail) {
     if (!any(!is.na(ok))) return()
     bad <- which(!is.na(ok) & !ok)
     shown <- paste(utils::head(detail[bad], 3), collapse = "; ")
     if (length(bad) > 3) shown <- sprintf("%s (+%d more)", shown, length(bad) - 3)
-    rows[[length(rows) + 1]] <<- data.frame(Dataset = dataset, Check = check, Status = if (length(bad)) "failed" else "ok",
+    rows[[length(rows) + 1]] <<- data.frame(Dataset = dataset, Category = category, Check = check, Status = if (length(bad)) "failed" else "ok",
       Problems = shown, Checked = sum(!is.na(ok)), Failed = length(bad), stringsAsFactors = FALSE)
   }
   subject <- function(x) if ("USUBJID" %in% names(x)) x$USUBJID else rep("", nrow(x))
@@ -69,20 +108,21 @@ sdtm_rules <- function(data, define = NULL) {
     who <- subject(x)
     # Keys: one DM record per subject, every subject in DM, the define.xml's domain keys,
     # and --SEQ unique within a subject.
-    if (name == "DM") add(name, "One record per subject", !duplicated(x$USUBJID), paste(who, "repeated"))
-    else if ("USUBJID" %in% names(x) && !is.null(dm)) add(name, "Subject is in DM", ifelse(is.na(x$USUBJID), NA, x$USUBJID %in% dm$USUBJID), paste(who, "not in DM"))
+    if (name == "DM") add(name, "keys", "One record per subject", !duplicated(x$USUBJID), paste(who, "has more than one record"))
+    else if ("USUBJID" %in% names(x) && !is.null(dm)) add(name, "subjects", "Subject is in DM", ifelse(is.na(x$USUBJID), NA, x$USUBJID %in% dm$USUBJID), paste(who, "is not in DM"))
     keys <- define$keys[[name]]
     if (length(keys) > 1 && all(keys %in% names(x))) {
       keys <- setdiff(keys, "STUDYID")
       k <- do.call(paste, c(key_text[[name]][keys], sep = " / "))
-      add(name, paste("Unique", paste(keys, collapse = ", ")), !duplicated(k), paste(k, "repeated"))
+      named <- do.call(paste, c(Map(function(v, x) paste(v, x), keys, key_text[[name]][keys]), sep = ", "))
+      add(name, "keys", paste("One record per", paste(keys, collapse = ", ")), !duplicated(k), paste(named, "occurs again"))
     }
     if ("USUBJID" %in% names(x)) for (v in grep("^[A-Z]{2}SEQ$", names(x), value = TRUE))
-      add(name, paste(v, "unique per subject"), !is.na(x[[v]]) & !duplicated(x[c("USUBJID", v)]), paste(who, v, x[[v]], "repeated"))
+      add(name, "keys", paste(v, "unique within a subject"), !is.na(x[[v]]) & !duplicated(x[c("USUBJID", v)]), paste(who, v, x[[v]], "occurs again"))
     # Order of dates within a record.
     for (start in grep("STDTC$", names(x), value = TRUE)) {
       end <- sub("STDTC$", "ENDTC", start)
-      if (end %in% names(x)) add(name, sprintf("%s on or before %s", start, end), ifelse(is.na(x[[start]]) | is.na(x[[end]]), NA, x[[start]] <= x[[end]]),
+      if (end %in% names(x)) add(name, "dates", sprintf("%s on or before %s", start, end), ifelse(is.na(x[[start]]) | is.na(x[[end]]), NA, x[[start]] <= x[[end]]),
         sprintf("%s %s %s after %s %s", who, start, x[[start]], end, x[[end]]))
     }
     # Study days: date minus RFSTDTC, plus one on or after it (no day 0).
@@ -91,7 +131,7 @@ sdtm_rules <- function(data, define = NULL) {
       if (!date %in% names(x) || !"RFSTDTC" %in% names(dm)) next
       days <- as.numeric(x[[date]] - at_dm(x, "RFSTDTC"))
       expected <- days + (days >= 0)
-      add(name, sprintf("%s from %s and RFSTDTC", v, date), ifelse(is.na(x[[v]]) | is.na(days), NA, x[[v]] == expected),
+      add(name, "days", sprintf("%s matches %s and RFSTDTC", v, date), ifelse(is.na(x[[v]]) | is.na(days), NA, x[[v]] == expected),
         sprintf("%s %s %s, dates give %s", who, v, x[[v]], expected))
     }
   }
@@ -101,10 +141,10 @@ sdtm_rules <- function(data, define = NULL) {
     first <- at_dm(ex, "RFXSTDTC"); last <- at_dm(ex, "RFXENDTC")
     within <- function(d) ifelse(is.na(d), NA, (is.na(first) | d >= first) & (is.na(last) | d <= last) & !(is.na(first) & is.na(last)))
     ok <- Reduce(function(a, b) ifelse(is.na(a), b, ifelse(is.na(b), a, a & b)), lapply(intersect(c("EXSTDTC", "EXENDTC"), names(ex)), function(v) within(ex[[v]])))
-    add("EX", "EX dates within RFXSTDTC to RFXENDTC", ok, sprintf("%s EX %s to %s, RFX %s to %s", ex$USUBJID, text(ex$EXSTDTC), text(ex$EXENDTC), text(first), text(last)))
+    add("EX", "exposure", "EX dates within RFXSTDTC to RFXENDTC", ok, sprintf("%s EX %s to %s, RFX %s to %s", ex$USUBJID, text(ex$EXSTDTC), text(ex$EXENDTC), text(first), text(last)))
   }
   if (!is.null(dm) && all(c("DTHFL", "DTHDTC") %in% names(dm)))
-    add("DM", "DTHFL = Y exactly when DTHDTC is given", (dm$DTHFL %in% "Y") == !is.na(dm$DTHDTC),
+    add("DM", "death", "DTHFL = Y exactly when DTHDTC is given", (dm$DTHFL %in% "Y") == !is.na(dm$DTHDTC),
       sprintf("%s DTHFL %s, DTHDTC %s", dm$USUBJID, text(dm$DTHFL), text(dm$DTHDTC)))
   # SUPP-- and RELREC records name their parent by RDOMAIN, USUBJID and IDVAR = IDVARVAL.
   for (name in c(grep("^SUPP", names(data), value = TRUE), intersect("RELREC", names(data)))) {
@@ -127,7 +167,7 @@ sdtm_rules <- function(data, define = NULL) {
           paste(s$USUBJID[i], given) %in% paste(p$USUBJID, if (is.character(parent)) trimws(parent) else parent)
         }
     }
-    add(name, "Points to an existing parent record", ok, sprintf("%s %s %s = %s not found", s$USUBJID, domain, idvar, value))
+    add(name, "links", "Points to an existing parent record", ok, sprintf("%s %s %s = %s not found", s$USUBJID, domain, idvar, value))
   }
   # Controlled terminology: values in the define.xml code list, where the source names one.
   cl <- define$codelists
@@ -139,10 +179,10 @@ sdtm_rules <- function(data, define = NULL) {
     y <- x[[v]]
     ok <- if (isTRUE(define$numeric[[cl$codelist[i]]])) suppressWarnings(as.numeric(as.character(y))) %in% suppressWarnings(as.numeric(codes))
       else trimws(as.character(y)) %in% codes
-    add(cl$dataset[i], sprintf("%s in code list %s", v, cl$codelist[i]), ifelse(is.na(y), NA, ok), sprintf("%s %s = %s", subject(x), v, text(y)))
+    add(cl$dataset[i], "codes", sprintf("%s in code list %s", v, cl$codelist[i]), ifelse(is.na(y), NA, ok), sprintf("%s %s = %s", subject(x), v, text(y)))
   }
   if (length(rows)) do.call(rbind, rows)
-  else data.frame(Dataset = character(), Check = character(), Status = character(), Problems = character(), Checked = integer(), Failed = integer())
+  else data.frame(Dataset = character(), Category = character(), Check = character(), Status = character(), Problems = character(), Checked = integer(), Failed = integer())
 }
 
 # ---- Comparisons ----------------------------------------------------------------------

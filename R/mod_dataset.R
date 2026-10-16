@@ -76,30 +76,48 @@ dataset_server <- function(id, b, tick, current, change, step, notify) {
     })
 
     # Failed checks of the graph (the dataset is then left out of generation), a failed
-    # build, and failed coherence checks of the generated data.
+    # build, and the SDTM rules the generated data break: those the source keeps first.
     output$problems <- renderUI({
       x <- req(state())
       problems <- rbind(
         if (x$info$stage == "error") {
           data.frame(Check = "Build failed", Problems = x$info$message)
         },
-        x$spec[c("Check", "Problems")],
-        x$coherence[c("Check", "Problems")]
+        x$spec[c("Check", "Problems")]
       )
-      if (!NROW(problems)) {
+      rules <- x$coherence
+      if (NROW(rules)) {
+        rules <- rules[order(rules$Inherited), ]
+      }
+      if (!NROW(problems) && !NROW(rules)) {
         return(NULL)
       }
-      left_out <- NROW(x$spec) || x$info$stage == "error"
-      div(
-        class = "alert alert-danger",
-        if (left_out) {
-          strong("Left out of the generated data until this is fixed.")
+      tagList(
+        if (NROW(problems)) {
+          div(
+            class = "alert alert-danger",
+            strong("Left out of the generated data until this is fixed."),
+            tags$ul(Map(
+              function(check, text) tags$li(strong(check), text),
+              problems$Check,
+              problems$Problems
+            ))
+          )
         },
-        tags$ul(Map(
-          function(check, text) tags$li(strong(check), text),
-          problems$Check,
-          problems$Problems
-        ))
+        if (NROW(rules)) {
+          div(
+            class = paste(
+              "alert",
+              if (all(rules$Inherited)) "alert-secondary" else "alert-danger"
+            ),
+            strong(paste0(
+              plural(nrow(rules), "SDTM rule"),
+              " broken in the generated data",
+              if (all(rules$Inherited)) ", as in the source"
+            )),
+            lapply(seq_len(nrow(rules)), function(i) broken_rule(rules[i, ]))
+          )
+        }
       )
     })
 
@@ -343,4 +361,49 @@ plot_theme <- function() {
       panel.grid.minor = element_blank(),
       text = element_text(colour = "#1d2327")
     )
+}
+
+# One broken SDTM rule: how many generated records break it, whether the source does too,
+# what to do and the first records.
+broken_rule <- function(r) {
+  category <- CHECK_CATEGORIES[[r$Category]]
+  source <- if (is.na(r$SourceFailed)) {
+    "The source has no records to check."
+  } else if (r$Inherited) {
+    sprintf(
+      "The source breaks it too, in %s of %s records, and each generated subject copies the records of a source subject.",
+      big(r$SourceFailed),
+      big(r$SourceChecked)
+    )
+  } else {
+    "The source keeps it, so generation broke it."
+  }
+  div(
+    class = "broken-rule",
+    div(
+      class = "broken-rule-head",
+      strong(r$Check),
+      badge(
+        if (r$Inherited) NA else "danger",
+        if (r$Inherited) "as in the source" else "new"
+      )
+    ),
+    p(
+      sprintf(
+        "%s of %s generated records. %s rule: %s.",
+        big(r$Failed),
+        big(r$Checked),
+        category$label,
+        category$about
+      ),
+      source,
+      if (r$Inherited) {
+        "Nothing to change here; correct the source if it matters."
+      } else {
+        category$fix
+      }
+    ),
+    hint("Generated: ", r$Problems),
+    if (r$Inherited) hint("Source: ", r$SourceProblems)
+  )
 }

@@ -48,7 +48,7 @@ generation_card <- function(ns) {
     card_header("Generation"),
     sliderInput(
       ns("policy"),
-      "Accept found rules reproducing at least",
+      "Minimum match rate for a rule",
       min = 90,
       max = 100,
       value = 100 * POLICY_SHARE,
@@ -57,8 +57,10 @@ generation_card <- function(ns) {
       ticks = FALSE
     ),
     hint(
-      "Applies to every dataset. Rules below it are rejected and their targets sampled.",
-      "Changes made by hand are kept."
+      "A rule computes a column from other columns, such as a test code from its name. It is used",
+      "when it gives the source value in at least this share of the records it can be checked on",
+      "(the Reproduced column); otherwise the column is sampled. Rules under 90% are never found.",
+      "Applies to every dataset; changes made by hand are kept."
     ),
     layout_columns(
       col_widths = c(6, 6),
@@ -196,6 +198,8 @@ board_server <- function(id, b, tick, step, open_dataset) {
       s <- build_status(b)
       list(
         rows = attention_rows(b, s),
+        inherited = s$dataset[s$coherence_inherited > 0],
+        checks = b$coherence,
         built = sum(s$stage == "built"),
         done = !is.null(s) &&
           all(s$stage %in% c("built", "skipped")) &&
@@ -208,37 +212,10 @@ board_server <- function(id, b, tick, step, open_dataset) {
     })
     output$attention <- renderUI({
       x <- attention()
-      if (x$done && is.null(x$rows)) {
-        return(div(
-          class = "alert alert-success mb-0",
-          icon("circle-check"),
-          sprintf(
-            " Nothing. %d datasets built and generated; every check passes.",
-            x$built
-          )
-        ))
-      }
-      if (is.null(x$rows)) {
-        return(hint(
-          "Nothing so far. Datasets appear here when a check of their graph or of their generated data fails."
-        ))
-      }
-      div(
-        class = "list-group list-group-flush",
-        lapply(seq_len(nrow(x$rows)), function(i) {
-          r <- x$rows[i, ]
-          input_button(
-            "open_dataset",
-            r$dataset,
-            class = "list-group-item list-group-item-action attention-item",
-            div(
-              class = "attention-head",
-              strong(r$dataset),
-              span(class = "text-danger-emphasis", r$what)
-            ),
-            hint(r$detail)
-          )
-        })
+      tagList(
+        attention_list(x),
+        inherited_note(x$inherited),
+        checked_rules(x$checks)
       )
     })
 
@@ -437,14 +414,99 @@ dataset_tile <- function(r, children) {
   )
 }
 
-# Datasets left out of generation (their build failed) or whose generated data break a
-# coherence check, with the first problem.
+# What needs a look, as a list of datasets to open.
+attention_list <- function(x) {
+  if (x$done && is.null(x$rows)) {
+    return(div(
+      class = "alert alert-success mb-0",
+      icon("circle-check"),
+      sprintf(
+        " Nothing new. %d datasets built and generated; they break no SDTM rule the source keeps.",
+        x$built
+      )
+    ))
+  }
+  if (is.null(x$rows)) {
+    return(hint(
+      "Nothing so far. Datasets appear here when a check of their graph fails, or their generated data break an SDTM rule the source keeps."
+    ))
+  }
+  div(
+    class = "list-group list-group-flush",
+    lapply(seq_len(nrow(x$rows)), function(i) {
+      r <- x$rows[i, ]
+      input_button(
+        "open_dataset",
+        r$dataset,
+        class = "list-group-item list-group-item-action attention-item",
+        div(
+          class = "attention-head",
+          strong(r$dataset),
+          span(class = "text-danger-emphasis", r$what)
+        ),
+        hint(r$detail)
+      )
+    })
+  )
+}
+
+# Datasets that break rules their source breaks too.
+inherited_note <- function(names) {
+  if (!length(names)) {
+    return(NULL)
+  }
+  div(
+    class = "inherited-note hint",
+    strong("As in the source: "),
+    lapply(names, function(name) {
+      input_button("open_dataset", name, class = "btn btn-link", name)
+    }),
+    " break SDTM rules that the source breaks too. Generated subjects copy the records of a source subject, so these come with them."
+  )
+}
+
+# The SDTM rules checked on the generated data, by category.
+checked_rules <- function(checks) {
+  if (!NROW(checks)) {
+    return(NULL)
+  }
+  categories <- intersect(names(CHECK_CATEGORIES), checks$Category)
+  tags$details(
+    class = "checked-rules",
+    tags$summary(sprintf(
+      "What is checked: %d SDTM rules in %d categories",
+      nrow(checks),
+      length(categories)
+    )),
+    tags$ul(lapply(categories, function(k) {
+      x <- checks[checks$Category == k, ]
+      broken <- x$Status == "failed"
+      status <- if (!any(broken)) {
+        sprintf("%s, all kept", plural(nrow(x), "rule"))
+      } else {
+        new <- sum(broken & !x$Inherited)
+        paste0(
+          sprintf("%s; %d broken as in the source", plural(nrow(x), "rule"), sum(x$Inherited)),
+          if (new) sprintf(", %d new", new)
+        )
+      }
+      tags$li(
+        strong(paste0(CHECK_CATEGORIES[[k]]$label, ":")),
+        paste0(CHECK_CATEGORIES[[k]]$about, "."),
+        muted(status)
+      )
+    }))
+  )
+}
+
+# Datasets left out of generation (their build failed) or whose generated data break an
+# SDTM rule the source keeps, with the first problem.
 attention_rows <- function(b, s) {
   if (is.null(s)) {
     return(NULL)
   }
   problem <- function(checks, name) {
-    x <- checks[checks$Dataset == name & checks$Status == "failed", ]
+    x <- checks[checks$Dataset == name & checks$Status == "failed" & !(checks$Inherited %||% FALSE), ]
     if (!nrow(x)) {
       return("")
     }
@@ -461,7 +523,11 @@ attention_rows <- function(b, s) {
         problem(b$checks[[r$dataset]], r$dataset)
       )
     } else if (r$coherence_failed > 0) {
-      c("Coherence check fails", problem(b$coherence, r$dataset))
+      c(
+        if (r$coherence_failed == 1) "Breaks a rule the source keeps" else
+          sprintf("Breaks %d rules the source keeps", r$coherence_failed),
+        problem(b$coherence, r$dataset)
+      )
     }
     if (length(what)) {
       data.frame(dataset = r$dataset, what = what[1], detail = what[2])

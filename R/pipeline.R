@@ -87,6 +87,7 @@ load_study <- function(files, names = basename(files)) {
   study <- new_study(source)
   study$spine <- spine_records(study)
   study$hashes <- vapply(study$source$data, digest::digest, "", algo = "xxhash64")
+  study$source_checks <- source_checks(study)
   study
 }
 
@@ -338,7 +339,7 @@ build_step <- function(b) {
     } else if (r$kind == "generate") {
       if (failed) b$generation_error <- conditionMessage(value) else {
         b$generated <- value$generated
-        b$coherence <- value$checks
+        b$coherence <- with_source(value$checks, b$study$source_checks)
         b$generation_error <- NULL
       }
       b$generated_key <- r$key
@@ -382,7 +383,8 @@ run_build <- function(b, poll = 0.05) {
 # attention when a check of its graph or of its generated data fails.
 build_status <- function(b) {
   if (is.null(b$info)) return(NULL)
-  failed <- function(checks, name) if (is.null(checks)) 0L else sum(checks$Dataset == name & checks$Status == "failed")
+  failed <- function(checks, name, inherited = FALSE) if (is.null(checks)) 0L else
+    sum(checks$Dataset == name & checks$Status == "failed" & (if (is.null(checks$Inherited)) !inherited else checks$Inherited == inherited))
   rows <- lapply(names(b$info), function(name) {
     i <- b$info[[name]]
     ds <- b$study$datasets[[name]]
@@ -392,7 +394,8 @@ build_status <- function(b) {
       discover = i$discover, fit = i$fit, submitted = i$submitted, finished = i$finished, message = i$message,
       rules = sum(rules == "accepted"), found = sum(rules == "accepted" & found), rejected = sum(rules == "rejected"),
       dropped = sum(node_types(ds) %in% "blank"), manual = name %in% b$manual,
-      spec_failed = failed(b$checks[[name]], name), coherence_failed = failed(b$coherence, name), stringsAsFactors = FALSE)
+      spec_failed = failed(b$checks[[name]], name), coherence_failed = failed(b$coherence, name),
+      coherence_inherited = failed(b$coherence, name, TRUE), stringsAsFactors = FALSE)
   })
   do.call(rbind, rows)
 }
