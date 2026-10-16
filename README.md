@@ -70,14 +70,14 @@ bench28, 153 members, seeds 1–3:
 
 | | |
 |---|---|
-| SDTM rules broken | 12 of 172; 1 more often than the members' data: MH keys USUBJID, MHTERM, MHSTDTC not unique in 398 of 919 records (MHTERM is not generated) |
-| relations | 43,781 mined, 43,669 scored; preserved 1.000 (dates 0.999); not preserved in any seed: CM.CMCLAS=SYSTEMIC HORMONAL PREPARATIONS ends by RFXENDTC (held out 0.000, seeds 0.09–0.20) |
-| fidelity | mean TVD 0.044, KS 0.033 |
-| correct link | 0.941 (the members unique on their timeline) |
-| membership accuracy | 0.941 (members found 1.000, held out matched 0.118) |
-| singleton values reproduced | 0.199 of 4,622 |
-| exact records, member / held out | EX, SE, SV, TU, SUPP 1.000 / 0.24–1.000; DS 0.84 / 0.40; QS 0.75 / 0.40; LB 0.16 / 0.08; AE, CM, DM, MH under 0.01 |
+| SDTM rules broken | 12 of 172; 4 more often than the members' data: MH keys USUBJID, MHTERM, MHSTDTC not unique in 398 of 919 records (MHTERM is not generated); EGDY, RSDY, TRDY not from RFSTDTC in 81–83%, 90–95%, 64–68% of records against 79%, 90%, 64% (planned days stay while the gap permutation moves their dates) |
+| relations | 43,781 mined, 43,669 scored; preserved 1.000 (dates 0.998); not preserved in any seed: CM.CMINDC=PRIMARY STUDY CONDITION starts by RFENDTC (held out 0.000, seeds 0.08–0.27), CM.CMROUTE=TOPICAL => AE.AEOUT=NOT RECOVERED/NOT RESOLVED (0.05–0.08), RS and TR LNKGRP R1-NA, R2-NA => SUPPDM COMPLT8 (8 relations, 0.06) |
+| fidelity | mean TVD 0.060, KS 0.033 |
+| correct link | 0.098 (0.941 with `synth.permute_gaps = FALSE`: the members unique on their timeline) |
+| membership accuracy | 0.520 (members found 0.157, held out matched 0.118; 0.941 without the permutation) |
+| singleton values reproduced | 0.046 of 4,622 |
+| exact records, member / held out | SUPP 1.000 / 1.000; SC 0.90 / 0.83; TU 0.88 / 0.86; SV 0.81 / 0.75; RS, SE, DS 0.38–0.47 / 0.38–0.43; QS, TR, EX 0.24–0.29 / 0.20–0.28; LB, VS, OE, PP, EG 0.07–0.16; AE, CM, DM, MH, PC under 0.01 |
 
-The source's own failures: CM keys not unique (3,557 of 4,132), DS and SC values outside the pilot's code lists (pharmaversesdtm's DSDECOD, DSCAT, SCCAT), --DY not from RFSTDTC in EG, RS, TR, TU (studies spliced with another RFSTDTC), OESEQ repeated, 4 EX records after RFXENDTC, one repeated SV visit. The held-out half breaks 1.0% of relations at all; synthetic seed 1 breaks 0.3%: the synthetic data keep the members' relations more tightly than a fresh real sample does. With 8 workers bench72 builds in 26 s; a 2,540-subject study generated from bench28 (3.3 million records, QS 1 million) builds in 126 s and generates in 81 s; its longest job is QS.
+The source's own failures: CM keys not unique (3,557 of 4,132), DS and SC values outside the pilot's code lists (pharmaversesdtm's DSDECOD, DSCAT, SCCAT), --DY not from RFSTDTC in EG, RS, TR, TU (studies spliced with another RFSTDTC), OESEQ repeated, 4 EX records after RFXENDTC, one repeated SV visit. The held-out half breaks 1.0% of relations at all; synthetic seed 1 breaks 0.4%: the synthetic data keep the members' relations more tightly than a fresh real sample does. With 8 workers bench72 builds in 26 s; a 2,540-subject study generated from bench28 (3.3 million records, QS 1 million) builds in 126 s and generates in 81 s; its longest job is QS.
 
 Data: [CDISC pilot project](https://github.com/cdisc-org/sdtm-adam-pilot-project), study CDISCPILOT01.
