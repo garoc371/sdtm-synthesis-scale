@@ -288,7 +288,7 @@ nodes_server <- function(id, b, current, change, notify) {
         text <- if (type == "rule") {
           "Calculated variables are edited in the Rules tab."
         } else {
-          "Keys and timing are copied from the donor's spine; visit days are then drawn from the schedule and the other dates follow them."
+          "Keys and timing are sampled with the spine: the visits attended and their days, then each visit's records from a source subject of the same type, dated on those days."
         }
         return(tagList(header, hint(text)))
       }

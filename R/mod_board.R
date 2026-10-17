@@ -483,7 +483,7 @@ inherited_note <- function(names) {
 # the middle 90% of the source's deviations from it.
 schedule_summary <- function(schedule, design) {
   if (is.null(schedule)) {
-    return(hint("Dates are the donors': there is no SV with visit numbers and RFSTDTC to draw visit days from."))
+    return(hint("No planned visit days: there is no SV with visit numbers and RFSTDTC. Visits fall as far apart as the source's did."))
   }
   p <- schedule$planned
   p <- p[as.character(p$visit) %in% names(schedule$deviation), ]

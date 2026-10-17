@@ -1,7 +1,7 @@
 # The study specification: one graph per dataset, in the fixed dataset order.
 #
 # A node is a variable of its dataset. Its type is one of
-#   key         subject key, or part of the time spine: copied from the subject's donor
+#   key         subject key, or part of the time spine: sampled with the subject's spine
 #               (see spine.R): every date, visit, study day, time point and record key
 #   rule        calculated by an accepted rule
 #   identifier  regenerated (USUBJID, SUBJID, …)
@@ -29,7 +29,7 @@ new_study <- function(source) {
 # until records are unique. Otherwise a category that every subject has the same number
 # of records of (one DSCAT "DISPOSITION EVENT" each) is planned like a test. Everything
 # else is a count of records per subject. The keys are checked unique in the generated data
-# only when they are unique in every source record (a source duplicate is copied with its donor).
+# only when they are unique in every source record (a source duplicate can be sampled with the spine).
 new_dataset <- function(study, name) {
   x <- study$source$data[[name]]
   variables <- names(x)
@@ -114,7 +114,7 @@ new_dataset <- function(study, name) {
   levels[name == "DM" | constant_within("USUBJID") | !anyDuplicated(x$USUBJID)] <- "subject"
   kinds <- vapply(x, value_kind, "")
   # A whole number that no subject repeats names the record (--SEQ, also when numbered in
-  # blocks: QS's 1001, 1002, 3001): it is copied with the record. Its values recur across
+  # blocks: QS's 1001, 1002, 3001): it comes with the record. Its values recur across
   # subjects and most records are in subjects with several, so it is not unique merely
   # because subjects have one record.
   several <- mean(tabulate(subjects)[subjects] > 1) >= 0.5
@@ -129,8 +129,8 @@ new_dataset <- function(study, name) {
   # A record linked to a record of an earlier dataset (TR to its TU lesion) sees that record's
   # spine and category columns in words as LINK.<VAR> (LINK.TULOC) when both were collected
   # at the same visit (the lesion's measurements where it was identified); later records follow
-  # their previous values. Link ids and visits are spine columns, so generated records link as
-  # their donor's do.
+  # their previous values. Link ids and visits are spine columns, and a linked record comes from
+  # a source subject with the same link ids (see `compose_dataset()`).
   link <- dataset_link(study$source$data, name)
   to <- study$datasets[[link$dataset %||% ""]]
   link <- if (!is.null(to) && link$key %in% structure$spine && link$by %in% to$structure$spine) {
@@ -281,7 +281,7 @@ record_feature <- function(x) x == "T.PHASE" | startsWith(x, "T.") & (grepl("=",
 # Rules are found, every other variable gets its suggested type (rule targets too, for
 # when their rule is rejected) and the starting graph is built, so a dataset starts out
 # complete. Datasets are prepared in order: later starting graphs use DM's arm. The spine
-# is copied, so it is never a rule's target.
+# is composed, so it is never a rule's target.
 discover_dataset <- function(study, name) {
   ds <- study$datasets[[name]]
   ds$rules <- discover_rules(discovery_frame(study, name), setdiff(ds$variables, c("USUBJID", ds$structure$spine)), ds$prefix)
@@ -379,12 +379,12 @@ generation_order <- function(ds) {
 # variables in column order. Synthpop-style: each sampled node uses the dataset's inputs
 # and every earlier node in the ordering at its level or coarser that carries information:
 # numbers, or codes with few levels. DM's inputs are the subject's spine features, so the
-# arm and characteristics follow the timing the subject copied (a screen failure is never
+# arm and characteristics follow the subject's composed timing (a screen failure is never
 # treated); the arm is not a predictor of baseline values. Other datasets' inputs are the
 # treatment, the subject's death and last visit, the record's phase and which of its dates
 # it has and the record it links to. A subject-level node also uses the subject results of earlier datasets (the study
 # eye with the new-lesion assessment). A record-level node also uses the visit the record was
-# copied at (a DS term at the retrieval visit).
+# placed at (a DS term at the retrieval visit).
 starting_graph <- function(study, ds, order = character()) {
   is_dm <- ds$name == "DM"
   arm <- if (is_dm) arm_variable(ds) else treatment_variable(study$datasets$DM)
@@ -447,7 +447,7 @@ check_dataset <- function(study, name) {
     if (name == "DM") check_row("DM", "A treatment arm variable (ARMCD or ARM) is in the spine or sampled",
       if (is.na(arm_variable(ds))) "no arm"),
     check_row(name, "Every variable has a type", ds$variables[is.na(node_types(ds))]),
-    check_row(name, "Every spine column is copied from the donor", setdiff(ds$structure$spine, variables_of_type(ds, "key"))),
+    check_row(name, "Every spine column is sampled with the spine", setdiff(ds$structure$spine, variables_of_type(ds, "key"))),
     check_row(name, "Every rule input and predictor is generated before use",
       paste(ds$variables, "needs", vapply(unavailable, paste, "", collapse = ", "))[lengths(unavailable) > 0]),
     check_row(name, "The graph has no cycles", tryCatch({generation_order(ds); character()}, error = conditionMessage)),
@@ -463,7 +463,7 @@ node_formula <- function(ds, variable, fit = NULL) {
   by <- if (!is.null(ds$structure$test) && ds$levels[[variable]] == "record") paste(" | per", ds$structure$test)
   implications <- if (!is.null(fit$implications)) vapply(seq_len(nrow(fit$implications)), function(i) implication_label(fit$implications[i, ]), "")
   paste0(switch(node_type(ds, variable),
-    key = if (variable == "USUBJID" && ds$name != "DM") "subject from DM" else "copied from the donor's spine",
+    key = if (variable == "USUBJID" && ds$name != "DM") "subject from DM" else "sampled with the spine",
     rule = rule_label(ds$rules[[variable]]),
     identifier = "new identifier",
     blank = "not generated",
@@ -480,5 +480,5 @@ record_structure_label <- function(ds) {
     subject = "one record per subject",
     schedule = paste0("planned ", paste(s$keys, collapse = " × ")),
     series = paste0("series of ", s$series, " per subject, by ", s$keys),
-    count = "records per subject"), "; records and timing copied from the donor's spine")
+    count = "records per subject"), "; records and timing sampled with the spine")
 }

@@ -10,7 +10,7 @@
 coherence_checks <- function(study, generated) sdtm_rules(output_datasets(study, generated), study$define)
 
 # The same rules on the source, read once on loading: a generated record that breaks a rule
-# the source breaks as often follows its donor, and only the others point to the generator.
+# the source breaks as often follows the source records it was sampled from, and only the others point to the generator.
 source_checks <- function(study) {
   given <- list(supp = study_supp(study), design = study_design(study), define = study$source$define)
   coherence_checks(given, list(data = study$source$data))
@@ -20,15 +20,15 @@ source_checks <- function(study) {
 # a rule more often than the source.
 CHECK_CATEGORIES <- list(
   keys = list(label = "Keys", about = "one record per subject in DM, per domain key of the define.xml and per --SEQ within a subject",
-    fix = "Open the dataset's Variables tab: a key column that is sampled or not generated, rather than copied from the donor, can repeat."),
+    fix = "Open the dataset's Variables tab: a key column that is sampled or not generated, rather than sampled with the spine, can repeat."),
   subjects = list(label = "Subjects", about = "every record's subject is in DM",
     fix = "No setting changes this: subjects are copied from DM. Report it with the examples."),
   dates = list(label = "Date order", about = "a record's start date is on or before its end date",
-    fix = "No setting changes this: a record's dates keep the donor's order when the visit days are drawn. Report it with the examples."),
+    fix = "No setting changes this: a record's dates keep their source order when placed on the visit days. Report it with the examples."),
   days = list(label = "Study days", about = "--DY is the date minus RFSTDTC, plus one from day 1 on (there is no day 0)",
     fix = "No setting changes this: study days are calculated from each date and RFSTDTC after the visit days are drawn. Report it with the examples."),
   exposure = list(label = "Exposure", about = "EX dates fall within the subject's first and last exposure dates",
-    fix = "No setting changes this: EX and DM dates keep the donor's order when the visit days are drawn. Report it with the examples."),
+    fix = "No setting changes this: EX and DM dates are placed on the visit days, each from its own source subject. Report it with the examples."),
   death = list(label = "Death", about = "DTHFL is Y exactly when DTHDTC is given",
     fix = "Open DM and look at how DTHFL is made (Rules and Variables tabs)."),
   links = list(label = "Parent records", about = "SUPP-- and RELREC records point to a record that exists",

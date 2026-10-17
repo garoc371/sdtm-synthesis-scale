@@ -373,7 +373,7 @@ broken_rule <- function(r) {
     "The source has no records to check."
   } else if (r$Inherited) {
     sprintf(
-      "The source breaks it about as often, in %s of %s records, and each generated subject copies the records of a source subject.",
+      "The source breaks it about as often, in %s of %s records, and each generated subject's records come from source subjects of its type.",
       big(r$SourceFailed),
       big(r$SourceChecked)
     )

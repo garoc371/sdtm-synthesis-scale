@@ -3,8 +3,9 @@
 #   Rscript privacy.R <label> <seed files...>
 # Timeline: a subject's dates as (dataset, variable, days from their first SV date); the shift
 # to 2020-01-01 keeps these. Correct link: synthetic subjects whose timeline matches exactly
-# one member, and that member is their donor. Membership: a real subject is called a member
-# when some synthetic subject has their timeline; balanced accuracy over members and held out.
+# one member, and that member is the source subject whose type they have. Membership: a real
+# subject is called a member when some synthetic subject has their timeline; balanced
+# accuracy over members and held out.
 # Singleton values: text values held by one member and no held-out subject, and the share of
 # them the synthetic data reproduce in the same variable. Exact records: synthetic records
 # equal to a member's record, and to a held-out subject's, without identifiers and --SEQ.

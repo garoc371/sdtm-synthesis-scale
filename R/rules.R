@@ -705,7 +705,7 @@ discover_rules <- function(frame, targets, name) {
   # a subject's own code (SUBJID) cannot cover newly generated values, and one keyed by a
   # record number (--SEQ, numbering each subject's records 1..n) only reflects the sort order.
   # A number with more values than a category model keeps is drawn anew (DM.AGE), unless it
-  # is copied with the spine (VISITNUM, T.*) or counts records (N.*).
+  # is composed with the spine (VISITNUM, T.*) or counts records (N.*).
   drawn <- vapply(full, is.numeric, TRUE) & values > MAX_DISCRETE_VALUES & !columns %in% s$spine & !grepl("^(T|N)\\.", columns)
   subject_values <- vapply(columns, function(v) max(group_index(frame, c("USUBJID", v))), 0L)
   numbered <- vapply(full, function(v) is.numeric(v) && !anyNA(v) &&

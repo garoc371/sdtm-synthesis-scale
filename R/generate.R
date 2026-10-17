@@ -3,19 +3,19 @@
 # `generate_study()` needs only the specification, fits and spine (see `study_bundle()`),
 # not the source data, so a saved bundle generates new data without Shiny.
 
-# Each synthetic subject copies the spine of one source subject, its donor (see spine.R):
-# their records in every dataset, with all dates, visits and record keys. Datasets are then
-# filled in the specification's order, the order their inputs assume. Last, visit days are
-# drawn from the schedule and the other dates follow them (`schedule_dates()`).
+# Each synthetic subject's spine is composed from the source's (`compose_spine()` in
+# spine.R): their records in every dataset, with all dates, visits and record keys. Datasets
+# are then filled in the specification's order, the order their inputs assume. The source
+# subjects whose type each synthetic subject has are kept (`types`), for privacy checks.
 # R's default generator is set with the seed: background workers default to another one,
 # and the same seed must give the same data in the app, a worker or a script.
 generate_study <- function(study, n, seed = 1) {
   set.seed(seed, kind = "Mersenne-Twister", normal.kind = "Inversion", sample.kind = "Rejection")
   ids <- sprintf("SYN-%0*d", max(4, nchar(n)), seq_len(n))
-  spine <- draw_spine(study$spine, spine_donors(study$spine, n), ids)
+  spine <- compose_spine(study, n, ids)
   built <- list()
   for (name in intersect(names(study$datasets), names(study$fits))) built[[name]] <- generate_dataset(study, name, built, spine)
-  list(data = schedule_dates(built, study$schedule), n = n, seed = seed)
+  list(data = built, n = n, seed = seed, types = attr(spine, "types"))
 }
 
 # A dataset's records are its spine; its other values are drawn in graph order. Datasets not
@@ -60,7 +60,7 @@ generate_dataset <- function(study, name, built, spine) {
 # ---- Saving -------------------------------------------------------------------------
 
 # Everything generation needs: the graphs and fits, the spine (the source's timing and
-# record keys, shifted, with subjects numbered), how SUPP-- variables unfold, and the trial
+# record keys, shifted, with subjects numbered, which new spines are composed from), how SUPP-- variables unfold, and the trial
 # design datasets, which hold no subject data.
 study_bundle <- function(study, seed = 1) {
   list(datasets = study$datasets, fits = study$fits, spine = study$spine, schedule = study$schedule, supp = study_supp(study),
