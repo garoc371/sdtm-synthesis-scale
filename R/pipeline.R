@@ -210,7 +210,7 @@ job_study <- function(study, name) {
   other <- setdiff(names(s$source$data), keep)
   link <- s$datasets[[name]]$link
   s$source$data[other] <- lapply(other, function(d) { x <- s$source$data[[d]]; x[intersect(c("USUBJID", paste0(d, "CAT"), unlist(s$datasets[[d]]$subject_results[c("test", "result")]),
-    if (identical(d, link$dataset)) c(link$by, link$visit, link$columns)), names(x))] })
+    if (identical(d, link$dataset)) c(link$by, link$visit, link$columns, link$copy)), names(x))] })
   s$datasets <- s$datasets[intersect(names(s$datasets), union(keep, earlier))]
   s$datasets[setdiff(names(s$datasets), keep)] <- lapply(s$datasets[setdiff(names(s$datasets), keep)], function(ds) ds[c("include", "subject_results")])
   s$fits <- list()
@@ -385,8 +385,7 @@ run_build <- function(b, poll = 0.05) {
 # attention when a check of its graph or of its generated data fails.
 build_status <- function(b) {
   if (is.null(b$info)) return(NULL)
-  failed <- function(checks, name, inherited = FALSE) if (is.null(checks)) 0L else
-    sum(checks$Dataset == name & checks$Status == "failed" & (if (is.null(checks$Inherited)) !inherited else checks$Inherited == inherited))
+  failed <- function(checks, name) if (is.null(checks)) 0L else sum(checks$Dataset == name & checks$Status == "failed")
   rows <- lapply(names(b$info), function(name) {
     i <- b$info[[name]]
     ds <- b$study$datasets[[name]]
@@ -397,7 +396,7 @@ build_status <- function(b) {
       rules = sum(rules == "accepted"), found = sum(rules == "accepted" & found), rejected = sum(rules == "rejected"),
       dropped = sum(node_types(ds) %in% "blank"), manual = name %in% b$manual,
       spec_failed = failed(b$checks[[name]], name), coherence_failed = failed(b$coherence, name),
-      coherence_inherited = failed(b$coherence, name, TRUE), stringsAsFactors = FALSE)
+      stringsAsFactors = FALSE)
   })
   do.call(rbind, rows)
 }

@@ -2,8 +2,8 @@
 # generator was built on), measured against the held-out half. Real data as the app reads it.
 #   Rscript privacy.R <label> <seed files...>
 # Timeline: a subject's dates as (dataset, variable, days from their first SV date); the shift
-# to 2020-01-01 keeps these. Correct link: synthetic subjects whose timeline matches exactly
-# one member, and that member is the source subject whose type they have. Membership: a real
+# to 2020-01-01 keeps these. Link: synthetic subjects whose timeline matches exactly one
+# member. Membership: a real
 # subject is called a member when some synthetic subject has their timeline; balanced
 # accuracy over members and held out.
 # Singleton values: text values held by one member and no held-out subject, and the share of
@@ -71,10 +71,9 @@ for (f in args[-1]) {
   g <- readRDS(f)
   syn <- subject_data(g$data)
   ts <- timelines(syn)
-  donors <- g$donors
-  # Correct link and membership.
+  # Link (the timeline matches exactly one member) and membership.
   matches <- lapply(ts, function(k) names(tm)[tm == k])
-  linked <- mean(vapply(names(ts), function(s) length(matches[[s]]) == 1 && matches[[s]] == donors[[s]], TRUE))
+  linked <- mean(vapply(names(ts), function(s) length(matches[[s]]) == 1, TRUE))
   ids_m <- split$members; ids_h <- split$held_out
   found <- mean(!is.na(tm[ids_m]) & tm[ids_m] %in% ts)
   false <- mean(!is.na(th[ids_h]) & th[ids_h] %in% ts)
@@ -101,7 +100,7 @@ num <- function(name) vapply(rows, function(r) r[[name]], 0)
 show <- function(name) sprintf("%.3f (%s)", mean(num(name)), paste(sprintf("%.3f", num(name)), collapse = " "))
 cat(sprintf("%s: %d members, %d held out, %d synthetic per seed\n", label, length(split$members), length(split$held_out), rows[[1]]$n))
 cat("  members unique on timeline ", show("unique"), "\n")
-cat("  correct link                ", show("linked"), "\n")
+cat("  link                        ", show("linked"), "\n")
 cat("  members found               ", show("found"), "\n")
 cat("  held out matched            ", show("false"), "\n")
 cat("  membership accuracy         ", show("accuracy"), "\n")

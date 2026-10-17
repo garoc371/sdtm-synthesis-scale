@@ -38,8 +38,6 @@ print(build_status(b)[c("dataset", "stage", "message")])
 bundle <- build_bundle(b)
 for (s in seeds) {
   g <- generate_study(bundle, n, s)
-  # The source subjects whose type each synthetic subject has (see compose_spine()).
-  donors <- setNames(b$study$source$data$DM$USUBJID[g$types], sprintf("SYN-%0*d", max(4, nchar(n)), seq_len(n)))
-  saveRDS(list(data = output_datasets(bundle, g), donors = donors), file.path(OUT, sprintf("%s_seed%d.rds", label, s)))
+  saveRDS(list(data = output_datasets(bundle, g)), file.path(OUT, sprintf("%s_seed%d.rds", label, s)))
   cat(label, "seed", s, "written\n")
 }

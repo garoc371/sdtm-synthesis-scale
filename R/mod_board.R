@@ -207,7 +207,6 @@ board_server <- function(id, b, tick, step, open_dataset) {
       s <- build_status(b)
       list(
         rows = attention_rows(b, s),
-        inherited = s$dataset[s$coherence_inherited > 0],
         checks = b$coherence,
         built = sum(s$stage == "built"),
         done = !is.null(s) &&
@@ -223,7 +222,6 @@ board_server <- function(id, b, tick, step, open_dataset) {
       x <- attention()
       tagList(
         attention_list(x),
-        inherited_note(x$inherited),
         checked_rules(x$checks)
       )
     })
@@ -464,21 +462,6 @@ attention_list <- function(x) {
   )
 }
 
-# Datasets that break rules about as often as their source.
-inherited_note <- function(names) {
-  if (!length(names)) {
-    return(NULL)
-  }
-  div(
-    class = "inherited-note hint",
-    strong("As in the source: "),
-    lapply(names, function(name) {
-      input_button("open_dataset", name, class = "btn btn-link", name)
-    }),
-    " break SDTM rules about as often as the source does. Generated subjects copy the records of a source subject, so these come with them."
-  )
-}
-
 # How visit days are drawn: the window for day 1, and per scheduled visit its planned day and
 # the middle 90% of the source's deviations from it.
 schedule_summary <- function(schedule, design) {
@@ -525,7 +508,8 @@ schedule_summary <- function(schedule, design) {
   )
 }
 
-# The SDTM rules checked on the generated data, by category.
+# The SDTM rules checked on the generated data, by category, and how many the source breaks
+# and so are not run.
 checked_rules <- function(checks) {
   if (!NROW(checks)) {
     return(NULL)
@@ -534,9 +518,10 @@ checked_rules <- function(checks) {
   tags$details(
     class = "checked-rules",
     tags$summary(sprintf(
-      "What is checked: %d SDTM rules in %d categories",
+      "What is checked: %d SDTM rules the source keeps, in %d categories%s",
       nrow(checks),
-      length(categories)
+      length(categories),
+      if (NROW(attr(checks, "not_run"))) sprintf("; %d more are not run, as the source breaks them", nrow(attr(checks, "not_run"))) else ""
     )),
     tags$ul(lapply(categories, function(k) {
       x <- checks[checks$Category == k, ]
@@ -544,11 +529,7 @@ checked_rules <- function(checks) {
       status <- if (!any(broken)) {
         sprintf("%s, all kept", plural(nrow(x), "rule"))
       } else {
-        new <- sum(broken & !x$Inherited)
-        paste0(
-          sprintf("%s; %d broken as in the source", plural(nrow(x), "rule"), sum(x$Inherited)),
-          if (new) sprintf(", %d more often than in the source", new)
-        )
+        sprintf("%s, %d broken", plural(nrow(x), "rule"), sum(broken))
       }
       tags$li(
         strong(paste0(CHECK_CATEGORIES[[k]]$label, ":")),
@@ -560,13 +541,13 @@ checked_rules <- function(checks) {
 }
 
 # Datasets left out of generation (their build failed) or whose generated data break an
-# SDTM rule more often than the source, with the first problem.
+# SDTM rule the source keeps, with the first problem.
 attention_rows <- function(b, s) {
   if (is.null(s)) {
     return(NULL)
   }
   problem <- function(checks, name) {
-    x <- checks[checks$Dataset == name & checks$Status == "failed" & !(checks$Inherited %||% FALSE), ]
+    x <- checks[checks$Dataset == name & checks$Status == "failed", ]
     if (!nrow(x)) {
       return("")
     }
@@ -584,8 +565,8 @@ attention_rows <- function(b, s) {
       )
     } else if (r$coherence_failed > 0) {
       c(
-        if (r$coherence_failed == 1) "Breaks an SDTM rule more often than the source" else
-          sprintf("Breaks %d SDTM rules more often than the source", r$coherence_failed),
+        if (r$coherence_failed == 1) "Breaks an SDTM rule the source keeps" else
+          sprintf("Breaks %d SDTM rules the source keeps", r$coherence_failed),
         problem(b$coherence, r$dataset)
       )
     }

@@ -150,5 +150,3 @@ table.dataTable tbody tr.selected > * { box-shadow: inset 0 0 0 9999px rgba(var(
 .checked-rules { margin-top: 0.75rem; font-size: 0.82rem; }
 .checked-rules summary { cursor: pointer; color: var(--bs-secondary-color); }
 .checked-rules ul { padding-left: 1rem; margin: 0.4rem 0 0; display: grid; gap: 0.3rem; }
-.inherited-note { margin-top: 0.75rem; font-size: 0.82rem; }
-.inherited-note .btn-link { padding: 0 0.15rem; font-size: inherit; vertical-align: baseline; }

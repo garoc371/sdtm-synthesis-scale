@@ -55,9 +55,10 @@ new_dataset <- function(study, name) {
     keys <- c(visit, test)
     counts <- vapply(x, function(v) length(unique(v)), 0L)
     extra <- variables[counts >= 2 & counts <= MAX_DEFAULT_LEVELS & !vapply(x, inherits, TRUE, "Date")]
-    # Supplemental qualifiers folded in from SUPP-- describe records, they never identify them.
+    # Supplemental qualifiers folded in from SUPP-- describe records, they never identify them;
+    # --SEQ numbers records, it does not say what they are.
     folded <- unlist(lapply(Filter(function(s) identical(s$parent, name), study$source$supp), `[[`, "columns"))
-    extra <- setdiff(extra, c("USUBJID", keys, folded))
+    extra <- setdiff(extra[!endsWith(extra, "SEQ")], c("USUBJID", keys, folded))
     while (unique_share(keys) < 0.99 && length(extra)) {
       shares <- vapply(extra, function(e) unique_share(c(keys, e)), 0)
       if (max(shares) <= unique_share(keys)) break
@@ -129,25 +130,36 @@ new_dataset <- function(study, name) {
   # A record linked to a record of an earlier dataset (TR to its TU lesion) sees that record's
   # spine and category columns in words as LINK.<VAR> (LINK.TULOC) when both were collected
   # at the same visit (the lesion's measurements where it was identified); later records follow
-  # their previous values. Link ids and visits are spine columns, and a linked record comes from
-  # a source subject with the same link ids (see `compose_dataset()`).
+  # their previous values. Link ids and visits are spine columns, and a linked record is kept
+  # only where the subject has the record it links to (see `compose_records()`).
   link <- dataset_link(study$source$data, name)
   to <- study$datasets[[link$dataset %||% ""]]
   link <- if (!is.null(to) && link$key %in% structure$spine && link$by %in% to$structure$spine) {
     y <- study$source$data[[link$dataset]]
     columns <- Filter(function(v) is.character(y[[v]]) && length(unique(stats::na.omit(y[[v]]))) %in% 2:MAX_DEFAULT_LEVELS,
       setdiff(c(to$structure$spine, intersect(paste0(to$prefix, c("CAT", "SCAT")), to$variables)), c("USUBJID", link$by)))
-    if (length(columns)) c(link, list(columns = columns, visit = intersect("VISITNUM", intersect(structure$spine, to$structure$spine))))
+    # A column the record shares with the record it links to (TRMETHOD and TUMETHOD) is that
+    # record's value, where every source record has it.
+    i <- match(paste(x$USUBJID, x[[link$key]]), paste(y$USUBJID, y[[link$by]]))
+    on <- !is.na(i) & !is.na(x[[link$key]])
+    shared <- setdiff(variables[startsWith(variables, prefix)], c(structure$spine, link$key))
+    copy <- Filter(function(v) {
+      from <- y[[paste0(to$prefix, substring(v, 3))]]
+      any(on) && !is.null(from) && identical(level_string(x[[v]][on]), level_string(from[i[on]]))
+    }, shared)
+    copy <- setNames(paste0(to$prefix, substring(copy, 3)), copy)
+    if (length(columns) || length(copy)) c(link, list(columns = columns, visit = intersect("VISITNUM", intersect(structure$spine, to$structure$spine)), copy = copy))
   }
   node <- list(type = NA_character_, predictors = character(), model = default_node_model(), prev = FALSE, vary = FALSE)
   nodes <- setNames(rep(list(node), length(variables)), variables)
-  for (v in structure$spine) nodes[[v]]$type <- "key"
+  for (v in c(structure$spine, names(link$copy))) nodes[[v]]$type <- "key"
   if ("USUBJID" %in% variables) nodes$USUBJID$type <- if (name == "DM") "identifier" else "key"
   list(name = name, prefix = prefix, class = domain_class(name, x), variables = variables,
     labels = study$source$labels[[name]], structure = structure, link = link,
     levels = setNames(levels, variables), kinds = kinds, inputs = character(), rules = list(),
     known_dates = if (name != "DM") known_dates(x, variables[kinds[variables] == "date"]),
-    subject_results = subject_results(x, prefix, structure$test), nodes = nodes, order = character(), include = TRUE, fixed = fixed)
+    subject_results = subject_results(x, prefix, structure$test), nodes = nodes, order = character(), include = TRUE, fixed = fixed,
+    unique_keys = unique_keys(x, study$source$define$keys[[name]]))
 }
 
 VISIT_HUB <- "SV"
@@ -205,12 +217,14 @@ dataset_frame <- function(study, name, data = study$source$data) {
 }
 
 # The columns of the record each record's link id points to, at that record's visit; a
-# column the linked dataset does not generate is missing.
+# column the linked dataset does not generate is missing. Shared columns (see
+# `new_dataset()`) are the linked record's at any visit.
 link_inputs <- function(x, link, data) {
   if (is.null(link)) return(x)
   y <- data[[link$dataset]]
   i <- match(paste(x$USUBJID, x[[link$key]]), paste(y$USUBJID, y[[link$by]]))
   i[is.na(x[[link$key]])] <- NA
+  for (v in names(link$copy)) x[[v]] <- if (is.null(y[[link$copy[[v]]]])) rep(NA, nrow(x)) else y[[link$copy[[v]]]][i]
   for (v in link$visit) {
     same <- as.numeric(x[[v]]) == as.numeric(y[[v]][i])
     i[is.na(same) | !same] <- NA
@@ -319,12 +333,13 @@ remaining_variables <- function(ds) ds$variables[!node_types(ds) %in% c("key", "
 generated_variables <- function(ds) variables_of_type(ds, c("key", "rule", "sampled", "identifier"))
 
 # Starting types, which the user can change. Text that is (nearly) unique per record is an
-# identifier; free text is not generated unless an accepted rule needs it.
+# identifier; free text is not generated unless an accepted rule needs it or it is the topic
+# (--TERM, --TRT), which SDTM requires.
 suggest_type <- function(ds, x, variable) {
   v <- x[[variable]]
   observed <- v[!is.na(v)]
   n_values <- length(unique(observed))
-  if (variable %in% unlist(lapply(accepted_rules(ds), rule_columns))) return("sampled")
+  if (variable %in% c(unlist(lapply(accepted_rules(ds), rule_columns)), paste0(ds$prefix, c("TERM", "TRT")))) return("sampled")
   if (!length(observed)) return("blank")
   if (is.character(v) && n_values >= 10 && n_values >= 0.99 * length(observed)) return("identifier")
   if (is.character(v) && n_values > 50 && n_values > 0.3 * length(observed)) return("blank")
@@ -481,4 +496,11 @@ record_structure_label <- function(ds) {
     schedule = paste0("planned ", paste(s$keys, collapse = " × ")),
     series = paste0("series of ", s$series, " per subject, by ", s$keys),
     count = "records per subject"), "; records and timing sampled with the spine")
+}
+
+# The define.xml's keys for a dataset, without STUDYID, when no source record repeats them:
+# generated records that repeat them are dropped.
+unique_keys <- function(x, keys) {
+  keys <- setdiff(keys, "STUDYID")
+  if (length(keys) > 1 && all(keys %in% names(x)) && !anyDuplicated(x[keys])) keys else character()
 }

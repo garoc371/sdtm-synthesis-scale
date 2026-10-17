@@ -87,9 +87,6 @@ dataset_server <- function(id, b, tick, current, change, step, notify) {
         x$spec[c("Check", "Problems")]
       )
       rules <- x$coherence
-      if (NROW(rules)) {
-        rules <- rules[order(rules$Inherited), ]
-      }
       if (!NROW(problems) && !NROW(rules)) {
         return(NULL)
       }
@@ -107,15 +104,8 @@ dataset_server <- function(id, b, tick, current, change, step, notify) {
         },
         if (NROW(rules)) {
           div(
-            class = paste(
-              "alert",
-              if (all(rules$Inherited)) "alert-secondary" else "alert-danger"
-            ),
-            strong(paste0(
-              plural(nrow(rules), "SDTM rule"),
-              " broken in the generated data",
-              if (all(rules$Inherited)) ", as in the source"
-            )),
+            class = "alert alert-danger",
+            strong(paste0(plural(nrow(rules), "SDTM rule"), " the source keeps, broken in the generated data")),
             lapply(seq_len(nrow(rules)), function(i) broken_rule(rules[i, ]))
           )
         }
@@ -364,56 +354,23 @@ plot_theme <- function() {
     )
 }
 
-# One broken SDTM rule: how many generated records break it, how often the source does, what
-# to do and the first records.
+# One broken SDTM rule: how many generated records break it, what to do and the first records.
 broken_rule <- function(r) {
   category <- CHECK_CATEGORIES[[r$Category]]
-  source_breaks <- !is.na(r$SourceFailed) && r$SourceFailed > 0
-  source <- if (is.na(r$SourceFailed)) {
-    "The source has no records to check."
-  } else if (r$Inherited) {
-    sprintf(
-      "The source breaks it about as often, in %s of %s records, and each generated subject's records come from source subjects of its type.",
-      big(r$SourceFailed),
-      big(r$SourceChecked)
-    )
-  } else if (source_breaks) {
-    sprintf(
-      "The source breaks it in only %s of %s records (%s, against %s here), so most of these come from generation.",
-      big(r$SourceFailed),
-      big(r$SourceChecked),
-      share_text(r$SourceFailed / r$SourceChecked),
-      share_text(r$Failed / r$Checked)
-    )
-  } else {
-    "The source keeps it, so generation broke it."
-  }
   div(
     class = "broken-rule",
-    div(
-      class = "broken-rule-head",
-      strong(r$Check),
-      badge(
-        if (r$Inherited) NA else "danger",
-        if (r$Inherited) "as in the source" else if (source_breaks) "more than the source" else "new"
-      )
-    ),
+    div(class = "broken-rule-head", strong(r$Check)),
     p(
       sprintf(
-        "%s of %s generated records. %s rule: %s.",
+        "%s of %s generated records; the source keeps it in all %s of its records. %s rule: %s.",
         big(r$Failed),
         big(r$Checked),
+        big(r$SourceChecked),
         category$label,
         category$about
       ),
-      source,
-      if (r$Inherited) {
-        "Nothing to change here; correct the source if it matters."
-      } else {
-        category$fix
-      }
+      category$fix
     ),
-    hint("Generated: ", r$Problems),
-    if (source_breaks) hint("Source: ", r$SourceProblems)
+    hint("Generated: ", r$Problems)
   )
 }

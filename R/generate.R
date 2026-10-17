@@ -3,10 +3,9 @@
 # `generate_study()` needs only the specification, fits and spine (see `study_bundle()`),
 # not the source data, so a saved bundle generates new data without Shiny.
 
-# Each synthetic subject's spine is composed from the source's (`compose_spine()` in
-# spine.R): their records in every dataset, with all dates, visits and record keys. Datasets
-# are then filled in the specification's order, the order their inputs assume. The source
-# subjects whose type each synthetic subject has are kept (`types`), for privacy checks.
+# Each synthetic subject's spine is generated first (`compose_spine()` in spine.R): their
+# records in every dataset, with all dates, visits and record keys. Datasets are then filled
+# in the specification's order, the order their inputs assume.
 # R's default generator is set with the seed: background workers default to another one,
 # and the same seed must give the same data in the app, a worker or a script.
 generate_study <- function(study, n, seed = 1) {
@@ -15,11 +14,12 @@ generate_study <- function(study, n, seed = 1) {
   spine <- compose_spine(study, n, ids)
   built <- list()
   for (name in intersect(names(study$datasets), names(study$fits))) built[[name]] <- generate_dataset(study, name, built, spine)
-  list(data = built, n = n, seed = seed, types = attr(spine, "types"))
+  list(data = built, n = n, seed = seed)
 }
 
 # A dataset's records are its spine; its other values are drawn in graph order. Datasets not
 # generated yet are read from the spine (DM's dates and SV's visits give the spine features).
+# Records repeating the define.xml's keys are dropped where no source record repeats them.
 # Records are sorted by subject, record keys and the dataset's main date (--STDTC or
 # --DTC). Rules that depend on record order (sequence numbers, and record selections when
 # dates tie), and the rules calculated from them, are redone after sorting.
@@ -40,6 +40,7 @@ generate_dataset <- function(study, name, built, spine) {
     identifier = if (v == "USUBJID") frame$USUBJID else if (name == "DM")
       sprintf("%0*d", width, seq_len(nrow(frame))) else as.character(stats::ave(seq_len(nrow(frame)), frame$USUBJID, FUN = seq_along)),
     sampled = draw_node(ds, v, fits$nodes[[v]], frame))
+  if (length(ds$unique_keys) && all(ds$unique_keys %in% names(frame))) frame <- frame[!duplicated(frame[ds$unique_keys]), , drop = FALSE]
   columns <- intersect(c("USUBJID", s$keys, main_date(ds$prefix, names(frame))), names(frame))
   frame <- frame[do.call(order, unname(lapply(frame[columns], function(v) if (is.character(v)) v else as.numeric(v)))), , drop = FALSE]
   ordered <- Filter(function(r) r$op %in% c("sequence", "record_flag"), accepted_rules(ds))
@@ -51,10 +52,25 @@ generate_dataset <- function(study, name, built, spine) {
     if (node_type(ds, v) == "rule") frame[[v]] <- rule_values(ds, ds$rules[[v]], frame) else
       if (v %in% calculated) frame[[v]] <- RULE_OPS$group$apply(group_rule(ds, v), frame)
   }
+  frame <- sdtm_results(frame, ds$prefix)
   for (v in setdiff(ds$variables, names(frame))) frame[[v]] <- switch(ds$kinds[[v]],
     date = as.Date(rep(NA, nrow(frame))), numeric = rep(NA_real_, nrow(frame)), rep(NA_character_, nrow(frame)))
   rownames(frame) <- NULL
   frame[ds$variables]
+}
+
+# SDTMIG result conventions: a test not done (--STAT) has no result and only it has a
+# reason (--REASND); --STRESN is --STRESC as a number.
+sdtm_results <- function(frame, prefix) {
+  p <- function(v) paste0(prefix, v)
+  if (p("STAT") %in% names(frame)) {
+    not_done <- frame[[p("STAT")]] %in% "NOT DONE"
+    for (v in intersect(p(c("ORRES", "ORRESU", "STRESC", "STRESN", "STRESU")), names(frame))) frame[[v]][not_done] <- NA
+    if (p("REASND") %in% names(frame)) frame[[p("REASND")]][!not_done] <- NA
+  }
+  if (all(p(c("STRESC", "STRESN")) %in% names(frame)))
+    frame[[p("STRESN")]] <- suppressWarnings(as.numeric(as.character(frame[[p("STRESC")]])))
+  frame
 }
 
 # ---- Saving -------------------------------------------------------------------------
