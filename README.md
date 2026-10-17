@@ -1,102 +1,104 @@
 # Synthetic SDTM
 
-A Shiny app that learns a generator from a set of SDTM datasets and samples linked synthetic data. Timing is sampled, not modelled: every date is shifted per subject so that RFSTDTC falls on 2020-01-01 (PHUSE-style; screening keeps its negative days), and each synthetic subject's time spine is generated from the trial design and from distributions pooled over source subjects, never taken from one source subject: a profile (arm, last visit, death, treatment, which datasets and categories they have), the visits attended, each visit's day (its planned day, TV's VISITDY or the source's median day, plus a deviation drawn from the source's), the records at each visit, and every date as a landmark (a visit, a DM date) plus a gap. Day 1 falls on a calendar date within the source's first and last visit. Each dataset gets one directed acyclic graph (DAG) for the content: variables are calculated by deterministic rules, sampled from models (maximum-likelihood linear models, or CART trees as in synthpop), or set as identifiers. Datasets are generated in SDTM class order (DM, special-purpose, interventions, events, findings, then by name), a dataset after the one its --LNKID points to (TR after TU), and may use DM variables, per-subject record counts of earlier datasets, the spine and category columns of the linked record at its visit (LINK.TULOC in TR), the columns the linked record shares where every source record has its value (TRMETHOD is TUMETHOD) and spine features (treatment status, death, last visit among the visits that mark progress, which datasets the subject has records in, the record's phase, which DM dates it falls on and which of its own dates it has).
+A Shiny app that reads the SDTM datasets of a clinical study and writes synthetic datasets with the same structure: the same domains, variables, code lists and links between records. A synthetic subject has a DM record, visits in SV, elements in SE, adverse events, lab results and so on, and the records agree with each other as SDTM requires.
 
-## Run
+User guide (using the app, how data are made, checks, privacy, known limitations): https://claude.ai/artifact/D94MY9WjojMpcFsyzzFSHN
+
+## Quick start
 
 ```r
 shiny::runApp()
 ```
 
-`global.R` lists the packages and stops with the `install.packages()` call for any that are missing. The start page loads uploaded files or a folder (xpt, sas7bdat, csv, define.xml), or one of the example studies in `data/` (the CDISC pilot, bench28, bench72).
+Run from the repository root. `global.R` lists the packages and stops with the `install.packages()` call for any that are missing. Nothing is sent to an outside service (the graph renderer and the font are in `www/`).
 
-Options: `synth.cores` (background workers, default up to 8), `synth.cache` (cache folder, default `cache/`), `synth.model` (model of a new node, `"auto"` for the linear models by default, or `"tree"`; also `SYNTH_MODEL` in the environment) and `synth.min_subjects` (k, the fewest subjects a stored value must be held by, default 5; also `SYNTH_MIN_SUBJECTS`). The graph renderer (viz.js) and the font are bundled in `www/`, so nothing is sent to an external service.
+1. **Load.** On the start page, pick an example study (`data/pilot`, `data/bench28`, `data/bench72`), upload files, or give a folder. xpt, sas7bdat and csv are read; a define.xml is optional but supplies labels, domain keys and code lists. DM is required.
+2. **Wait for the build.** Every dataset is built in background workers, DM first. The overview shows a tile per dataset and a **Needs a look** list: a failed build, or generated records that break an SDTM rule the source keeps.
+3. **Generate and download.** Set subjects and seed in the Generation card, then download the synthetic data (xpt or csv, zipped) or the specification (`.rds`).
 
-## How it works
+To generate without the app:
 
-Loading a study is the only required step. Nothing waits for a confirmation.
+```r
+generate_study(readRDS("specification.rds"), n = 200, seed = 1)
+```
 
-- **One policy.** Found rules that reproduce at least the policy share of checked records (90% by default) are accepted in every dataset, the others rejected. The slider on the overview changes the share for the whole study.
-- **Background build.** The source is read in a worker; DM is built first (later starting graphs use its arm), then every other dataset in parallel, largest first: rules found, resolved by the policy, starting graph built, checked and fitted. Once nothing is left to build, the study is sampled and checked against the SDTM rules (below). The app only submits jobs and collects results, so it answers while workers compute.
-- **Cache by content.** A dataset's build is stored under a hash of its records, DM's, the code, and what the policy decides for its found rules. Loading the same study again takes seconds; a policy change rebuilds only the datasets where it changes a decision; an edit rebuilds only that dataset.
-- **Exceptions, not approvals.** The board shows every dataset as a tile, the datasets that need a look (a build error, a failed check of the graph, which leaves the dataset out of the generated data, or a broken SDTM rule), and a ledger of every decision ranked by the number of source records it changes.
-- **Changes by hand.** Any dataset can be opened from a tile or the ledger: rules, variable types, graph, and a comparison of source and synthetic data. A change is marked as made by hand, kept when the policy changes, and rebuilt at once; "Back to the policy" drops it.
+The specification holds every source subject's shifted timeline, so handle it like the source data.
 
-Save: the synthetic data (xpt/csv) or a specification bundle (`generate_study(readRDS(file), n, seed)`). The bundle holds model coefficients and the shifted spine of every source subject (arm, record keys, visits, dates), so it is as private as that timing, not more: visit days are drawn at generation, not in the bundle. The bundle also holds the visit schedule: planned days, deviation percentiles without the k most extreme subjects at either end, and the source's first and last SV date. Outside the spine it keeps no value held by fewer than k subjects, other than the death values the spine's death date already shows (DTHFL, DEATH, FATAL), and no source minimum or maximum.
+## Options
 
-## Rule discovery
+Set before `runApp()`.
 
-No rule is named in advance: every column is searched, on a sample of whole subjects (at most 5,000 records); the best few candidates per column are then checked on all records, so the shares shown are exact.
+| Option | Default | Effect |
+|---|---|---|
+| `synth.cores` | up to 8 | background workers |
+| `synth.cache` | `cache/` | build cache, keyed by the content of the records, DM, the code and the decisions |
+| `synth.model` / `SYNTH_MODEL` | `"auto"` | `"auto"` for linear models, `"tree"` for CART |
+| `synth.min_subjects` / `SYNTH_MIN_SUBJECTS` | 5 | k: the fewest subjects a stored or drawn value must belong to |
 
-Searched rules come from a fixed set of operations (constant, sequence, study day, range flag, record flag, date offset, unit conversion, lookup, R expression). A unit conversion carries a result that is not a number ("PRESENT", "<5") over as written. Each operation proposes inputs from column kinds and the record structure only, learns its parameters from the source, and is judged by the share of records it reproduces.
+## How data are made
 
-A rule's share counts only *checked* records, meaning records that could contradict it. A lookup is scored on subjects it was not learnt from: the table is learnt on the odd-numbered subjects and checked on the even ones, then the other way round, so checked records are those whose key also occurs in the other half. Otherwise a table of many keys memorises which keys happened to carry a rare value (AELLT to AESHOSP: the hospitalised terms) without predicting it. A rule is proposed when it reproduces at least 90% of checked records, including half of the records that the most common value gets wrong, so a skewed target is not "explained" by an arbitrary input. Lookup keys are categories shared by at least two subjects per value on average, so a subject's own code is never a key; record numbers (--SEQ) are never keys either, nor is a number with more values than a category model keeps unless it comes with the spine (DM.AGE is drawn anew, so a table keyed by age cannot cover the synthetic ages). A learnt table keeps only keys and values held together by at least k subjects (`synth.min_subjects`, default 5); a key it does not keep gives a missing value. The exception is a death value: T.DIED to DTHFL, and a key only on records dated on the death date that every subject who died holds (DEATH, FATAL to AESDTH), not a cause of death. A value of at least k subjects whose keys are all dropped becomes its own key (DSDECOD WITHDRAWAL BY SUBJECT, see Node models). In a scheduled dataset all its record keys together are also tried as one key, for values set by the schedule (RSLNKGRP by visit, test and evaluator). With few records there are few checked records, and the rules table shows both numbers.
+Two parts: the **spine** (when things happen) and the **content** (what the records say).
 
-A result can also be calculated from other records of its group: the subject's records at one visit, split further by --CAT, --SPEC, --LNKGRP, --EVAL or --EVALID where every test records it. Per test, discovery tries a sum of other tests (chosen by least squares, then one test at a time while fewer records are missed), a + b·x or a / x of one other test, and a lookup of up to three other tests' values, scored on held-out subjects like any lookup; a test is derived when it reproduces at least 90% of its checked groups (bench28: ACTOT and NPTOT as item sums, SUMDIAM as the lesion sum per TRLNKGRP, LAMZHL = 0.693 / LAMZ, OVRLRESP by target, non-target and new-lesion response, an NPI item's score 0 when it is ABSENT). Expressions and lookups use only tests with one record per group. A test is not derived from itself through others; the one with the higher share chooses first. Generation draws the group's other tests, then calculates; the rules table shows the calculation of each test.
+**Spine** (`R/spine.R`). Dates, visits, study days, record keys, --SPID and the arm. Drawn, never modelled, and never copied from one source subject:
 
-## Time spine
+- Dates are shifted per subject so RFSTDTC is 2020-01-01; day 1 is then put on a random calendar date within the source's first and last visit.
+- Each synthetic subject gets a profile (arm, last visit, death, which datasets and categories they have), drawn from cells of at least k source subjects.
+- Visits fall on their planned day (TV's VISITDY, else the source median) plus a drawn deviation.
+- SV is drawn first. Every other record sits at a visit the subject attended and within that visit's SV dates where the source always is.
+- SE follows the arm's path in TA. EPOCH is the epoch of the element holding the date.
+- Other dates are a landmark (a visit, a DM date) plus a gap drawn from the source.
+- DM dates come from the records: DMDTC the first visit, RFXENDTC the last exposure.
+- A linked dataset follows its parent (TR after TU), keeps the parent's link ids, and copies the columns it shares with the parent (TRMETHOD is TUMETHOD).
 
-`R/spine.R`. Dates are read at day resolution; a time of day is dropped. A partial date gets day 15 when it has a month, July 15 when it has only a year; one without a year stays missing. The imputed day is then moved, within the stated month or year, to keep the orders that every complete date of the source keeps (at least 99% of at least 10 records): start before end and collection date, a record within the subject's DM dates (a history date before the first dose), a visit's dates after the previous visit's. A bound outside the stated period is a contradiction of the source, and the date keeps its imputed day.
+**Content** (`R/study.R`, `R/rules.R`, `R/models.R`). Each dataset is a graph of its variables. A variable is calculated by a rule found in the data (LBTEST from LBTESTCD, a unit conversion, a questionnaire total), or drawn from a model given the arm, the timeline and the previous value. A rule is used when it reproduces at least 90% of the source records (the overview's slider). Values held by fewer than k subjects are never drawn.
 
-The spine columns of a dataset are its dates, timing variables (VISITNUM, VISIT, --DY, --TPT, …), record keys, a series' --SPID, and in DM the arm. They are sampled, never modelled, and content is generated given them. No visit, record or date comes from one source subject. Every draw pools source subjects of the same profile, coarsened step by step (arm, last visit and status; arm, whether the subject reached the last visit and status; that and status; status; all), and takes only values held by at least k subjects of the cell; a number comes from the cell's 101 percentiles, kept within ends that leave out the k source subjects furthest either way, and a yes or no as often as among the cell's subjects. The profile is the arm, then the last visit given the arm, then death and treatment status given both, then, dataset by dataset and category by category, whether the subject has records, and for each content column of at most 10 values whether the subject has a record with each value at least k subjects have (TULOC BONE, TUORRES NEW): each given the profile and the one or two flags drawn before that add most mutual information in the source, drawn yes as often as among the cell's subjects, and fixed where the profile or an earlier flag fixes it in every source subject, at least k of them (every bench28 subject with RS has the CIBIC+ questionnaire, only placebo subjects the placebo epoch). A visit that marks progress is attended at the subject's last visit, missed after it, and before it as often as by source subjects who went past it; any other visit (unscheduled, AE follow-up) as often as by source subjects on the same side of their last visit. A scheduled visit falls on its planned day plus a deviation. The planned day is TV's VISITDY (per arm when TV gives one); without TV it is the source's median day of a visit that marks progress (see below) and that at least a quarter of the subjects attended (the pilot's 18 planned visits; its unscheduled visits reach at most 17%). The deviation is drawn from the source's study day minus the planned day at that visit. Any other visit falls some days after the previous one, drawn the same way from the source's gaps at that visit, and not after the next planned one. DM's dates come next, then SV, the datasets DM dates are taken from (the latest date first), and the rest; a linked dataset (TR) after the one it links to (TU). At each visit attended, a dataset planned by visit gets a panel, among source subjects who attended it on the same side of their last visit and have the same flags of that dataset (else the same presence of it: a rare set of MH categories): in the finest cell of at least k subjects, the set of contents (tests, categories, time points) is drawn whole where k of them share it, else whether the subject has each content, as often as the cell's subjects; then each content's number of records given the set. SE follows the arm's path in TA: the number of planned elements reached is drawn from the pooled cell, TE's unplanned elements given it, and each element ends where the next starts; every other dataset's EPOCH is then the TA epoch of the element holding the record's date. A dataset planned by test or category (DS, MH) gets one such set per subject; its visit is, per content, a fixed visit (the nearest attended), the subject's first, last that marks progress, last or none, whichever most source records have. Series (a medication recorded at several visits) come as a number of series, then each series' content and first visit, then whether it runs to the subject's last visit of the dataset, as often as source series of that content and first visit, else its number of records. A subject whose records lack a dataset, category or value their flags have is drawn again, up to 20 times (not SE). A record's visit is one the subject attended (the nearest), and its visit name comes from SV where its dataset leaves it empty. A record linked to another dataset's comes among subjects with the same link ids where enough have them, and is dropped when the subject has none to link to. Each date is a landmark plus a gap drawn from the source's: of the record's visit, the next visit, the same visit's first date in each dataset drawn at visits and composed before (not a series: a medication's start is no visit date), the DM dates, the first and last visit, day 1 and the record's main date, the one whose gap to the date varies least in the source (10th to 90th percentile) and that k subjects have; gaps are drawn per visit and time point (a PK profile's hours), per content and first visit for a series, or per content and occurrence (a second OTHER EVENT apart from the first), and the date is kept on or after the landmarks the source's dates are always on or after, and on or before those it is always on or before (an adverse event's end after its start, a disposition by the last visit); last, within its visit's SV dates where the source's always are. A visit's records at one time point share their date. A DM date that is a dataset's first or last date in at least 90% of the source subjects (RFXENDTC the last EXENDTC, RFENDTC the DSSTDTC of the disposition event) is taken from that dataset's composed records, from SV where SV gives one (DMDTC the first visit); another dataset's first or last date that equals a DM date in at least 90% of the source subjects (XD's last XDENDTC at RFXENDTC) is set to it, unless that moves it out of its visit. Sequence numbers and --SPID are numbered per subject unless the record keys give them. Every --DY, --STDY and --ENDY is then calculated from its date and RFSTDTC, including those the source stored as the planned day (EG, RS, TR in bench28). Day 1 falls on a calendar date drawn so that the subject's visits lie between the source's first and last SV date, read before the shift. Where few records carry a pattern no model keeps, implications learnt from the source are enforced: a key value that always comes with one value (a DS date on DTHDTC gives DEATH), or a value that only occurs at some key values (SCREEN FAILURE only for untreated subjects). Each holds on every source record, in at least k subjects (default 5; on either side, values of fewer subjects count together as one value, which keeps no implication of its own: a value never seen at any rare key value is not drawn at one; the exception is a value forced by a death feature, T.DIED or a date equal to DTHDTC, such as DEATH or FATAL, because the spine already shows the death), and would hold by chance with probability below 10⁻⁴ (a set of levels picked after the fact is penalised by the number of such sets). The last visit counts only visits that mark progress: in number order, a visit whose subjects mostly attended the latest counted visit with at least as many subjects, so an AE FOLLOW-UP after an early stop does not make a week-8 dropout look like a completer. A node modelled per test has its implications found per test: the last visit gives PROTOCOL COMPLETED to the disposition event, not to the subject's other DS records. A category that a lookup derives from the node alone (CMROUTE from CMTRT) carries its implications through the node.
+**Record conventions** (`R/generate.R`). A record that repeats the define.xml keys is dropped where the source never repeats them. A test NOT DONE has no result. --STRESN is --STRESC as a number.
 
-## Node models
+## What is checked
 
-A sampled node is fitted per test and per stage (first record of a series, or a later one given the previous value). `auto` is the default: categories (multinomial, missing being a value) for at most 10 distinct values, otherwise a number: a model of whether it is recorded, then a linear model of its normal score (its percentile in the source, on the normal scale). A drawn score is read back through the test's 101 source percentiles, so a value keeps the source's shape and repeated values (a dose of 54 mg, a zero). The ends leave out the k subjects with the lowest and the k with the highest values: percentiles beyond the (k+1)-th lowest subject minimum or (k+1)-th highest subject maximum are set to it, so the source minimum and maximum are not kept. A category value held by fewer than k subjects of its test is left out of the fit and never drawn (a test with no value left stays missing); predictor levels of fewer than k subjects share the reference level. `tree` matches distributions about as closely (bench28 mean KS 0.025 against 0.029). A category with more than 30 values has too many to model; when an accepted lookup derives a coarser category from it alone, that one is modelled and the value drawn within it by its frequencies (DSDECOD on arm and last visit, then the verbatim DSTERM within it), otherwise it is drawn from its frequencies. Within a coarse value only verbatims of at least k subjects are drawn. With either model, and with any number of values, a common coarse value with no verbatim of k subjects is written as the verbatim: on the pilot, the 22 DSTERM verbatims of WITHDRAWAL BY SUBJECT are each rare, so DSTERM is WITHDRAWAL BY SUBJECT. `tree` fits a classification tree for categories and a regression tree for numbers (with a classification tree of whether it is recorded); leaves have at least 5 records, and a value is drawn from its leaf's class counts or, for a number, between its leaf's 21 quantiles, within the same ends. Implications are kept with either model. A tree stores split points and per-leaf counts or quantiles, so a leaf of 5 records discloses more about those records than a coefficient does; `auto` stores a test's 101 percentiles.
+`sdtm_rules()` in `R/review.R` is a fixed list of SDTMIG rules: keys, subjects in DM, date order, study days, exposure dates, death, parent records (SUPP--, RELREC, --LNKID, --LNKGRP), visits against SV and TV, code/name pairs, results, trial design (TA, TE, EPOCH), AE flags, code lists.
 
-## Record structures
+The same rules run on the source when it is loaded. A rule is run on the synthetic data only where the source keeps it in every record. Rules the source breaks are listed apart, not scored. No rule is mined from the data.
 
-DM has one record per subject. Findings (--TESTCD) and datasets with one record per subject and visit follow a schedule of planned keys: the visit and test, then the categories that best separate repeated records (OELAT, not OESEQ: --SEQ numbers records, it never names them). When these leave records unseparated, a text column that separates 99% of a subject's records and whose values recur across subjects (TULNKID, TRLNKID: T01, NT01, NEW01) is a key whatever its number of values, so the records linking TR to TU keep their link ids. Otherwise, a category that every subject has the same number of records of (one DSCAT "DISPOSITION EVENT" each in DS) is planned the same way, and values are modelled per category. Everything else is a count of records per subject. A generated record that repeats the define.xml's keys is dropped where no source record repeats them (a second FINAL LAB VISIT in DS). A test not done (--STAT) has no result and only it has a reason (--REASND), and --STRESN is --STRESC as a number.
+Not checked: clinical associations (placebo with no drug concentration, stable weight within a subject, a medication that comes with an adverse event). See the guide's Known limitations.
 
-## SDTM rules
+## Code map
 
-The generated data are checked against a fixed list of SDTMIG rules (`sdtm_rules()`, R/review.R), read from the output datasets (SUPP-- unfolded, trial design included) and the define.xml alone, never from the fitted specification:
+| File | What |
+|---|---|
+| `global.R`, `ui.R`, `server.R` | packages, page layout, polling the build |
+| `R/pipeline.R` | load, build in workers, cache, bundle |
+| `R/source.R`, `R/supp.R`, `R/domains.R` | reading, SUPP-- folding, dataset classes and order |
+| `R/spine.R` | dates, schedule, profile, visits, records, SE, EPOCH |
+| `R/study.R` | record structure, links, graph nodes |
+| `R/rules.R` | rule search and scoring |
+| `R/models.R` | node models (`auto`, `tree`) |
+| `R/generate.R` | generation and output |
+| `R/review.R` | SDTM rules and comparisons |
+| `R/mod_*.R`, `R/ui_helpers.R`, `www/` | app pages |
 
-- **Keys**: one DM record per subject, the define.xml's domain keys unique, --SEQ unique per subject.
-- **Subjects**: every record's subject in DM.
-- **Date order**: --STDTC on or before --ENDTC, no date after DTHDTC.
-- **Study days**: --DY the days from RFSTDTC, with no day 0.
-- **Exposure**: EX dates within RFXSTDTC to RFXENDTC, which are EX's first and last.
-- **Death**: DTHFL = Y exactly when DTHDTC is given and when DS has a DEATH record.
-- **Parent records**: SUPP-- and RELREC point to an existing record; --LNKID and --LNKGRP match a record of the subject in another dataset.
-- **Visits**: a record's visit is one of the subject's SV visits, with its name and within its dates; VISITDY is TV's; visits start in VISITNUM order.
-- **Names**: a code and its name pair one to one (--TESTCD and --TEST, ARMCD and ARM, VISITNUM and VISIT), a dictionary term has one body system, a test one standard unit.
-- **Results**: --STRESN is --STRESC as a number; a test not done has no result, and only it a reason.
-- **Trial design**: arms are TA's and elements TE's; a subject's elements follow the arm's path in TA, one after the other; EPOCH is that of the element holding the date.
-- **Flags**: AESER is Y exactly when a serious criterion is; AEOUT is FATAL exactly when AESDTH is Y.
-- **Code lists**: values in the define.xml's code list.
-
-Dates are compared for order only. The same function runs on the source when it is loaded, and a rule is run on the generated data only where the source keeps it in every record it checks; the rules the source breaks are listed apart, not scored. No rule is mined from the data.
+The header comment of each file explains its part in detail.
 
 ## Benchmark
 
-`bench/`. `Rscript bench/build_bench.R` writes two folders to `data/` (needs `pharmaversesdtm`):
+```sh
+Rscript bench/build_bench.R                    # writes data/bench28 and data/bench72 (needs pharmaversesdtm)
+SHOW=1 bench/eval/run.sh b28 data/bench28      # one study, seeds 1–3
+```
 
-- **bench28**: the pilot's DM, EX, LB, MH, QS, SV, VS, AE, CM; pharmaversesdtm's DS, EG, PC, PP, and the ophthalmology and oncology OE, RS, SC, TR, TU; SUPP datasets; the pilot's trial design.
-- **bench72**: bench28 with QS, LB and OE split by category (QSAD, LBCH, OEVA, …) and 34 custom-domain replicas (XA…YA: a domain's records for 70% of its subjects, with its SUPP).
+`run.sh` splits the subjects in half, builds from one half (members), generates as many subjects, and measures with code kept apart from the app's: SDTM rules the members keep (`rules.R`), marginal fidelity (`fidelity.R`), and linkage and membership tests (`privacy.R`). Output goes to `bench/out/eval/` (or `OUT`).
 
-`bench/eval/run.sh <label> [folder]` (default `data/pilot`) splits the real subjects at random in half (`SPLIT=1`), builds the study from one half (the members) with the app's code, generates as many subjects as there are members for seeds 1–3, and measures them with code kept apart from the app's:
+- **pilot**: CDISCPILOT01, 10 datasets, 306 subjects.
+- **bench28**: the pilot plus pharmaversesdtm's DS, EG, PC, PP, OE, RS, SC, TR, TU, SUPP-- and trial design, joined onto the pilot's subjects.
+- **bench72**: bench28 with QS, LB, OE split by category and 34 renamed copies of domains.
 
-- **SDTM rules** (`rules.R`): every rule above that the members' real data keep in every record; a rule any seed breaks is a failure of the generator. `SHOW=1` also lists the rules the members' data break.
-- **Fidelity** (`fidelity.R`): mean total variation distance of categories and Kolmogorov–Smirnov distance of numbers, per variable.
-- **Privacy** (`privacy.R`), on the same split. Timeline: a subject's dates as days from their first visit. Link: synthetic subjects whose timeline matches exactly one member, that member being the source subject whose type they have. Membership accuracy: a real subject is called a member when a synthetic subject has their timeline, balanced over members and held out. Singleton values: text values held by one member and no held-out subject, and the share reproduced. Exact records: per dataset, synthetic records equal to a member's record and to a held-out subject's, without identifiers and --SEQ.
-
-153 members, seeds 1–3:
+Latest run (153 members, seeds 1–3):
 
 | | pilot | bench28 | bench72 |
 |---|---|---|---|
-| SDTM rules the members keep (not run) | 79 (12) | 276 (30) | 607 (52) |
-| broken in any seed | 0 | 0 | 1: OEVA OESEQ repeated in 1–9 of 2,040–2,164 records (since fixed, checked on OEVA alone; bench72 not rerun) |
-| fidelity, mean TVD / KS | 0.115 / 0.054 | 0.069 / 0.044 | 0.091 / 0.049 |
-| link (members unique on their timeline) | 0.081 (0.941) | 0.044 (0.941) | 0.017 (0.987) |
-| membership accuracy (members found, held out matched) | 0.495 (0.092, 0.102) | 0.485 (0.081, 0.111) | 0.496 (0.015, 0.024) |
-| singleton values reproduced | 0.086 of 2,110 | 0.046 of 4,622 | 0.041 of 11,096 |
-| exact records, member / held out | SV 0.91 / 0.87; QS 0.40 / 0.39; DS 0.27 / 0.26; EX 0.19 / 0.21; LB, VS 0.08 / 0.07; MH 0.01; AE, CM, DM 0 | SUPP 1.00 / 1.00; SC 0.95 / 0.91; SV 0.93 / 0.89; TU 0.90 / 0.89; DS, SE 0.52, 0.50 / 0.48, 0.50; QS 0.44 / 0.42; EX, TR, PP 0.12–0.22; OE, LB, VS, RS, EG 0.04–0.09; MH 0.01; DM 0.002; AE, CM, PC 0 | as bench28; QSHI 0.98, XL 0.94, XR 0.82, QSMM 0.81 |
+| SDTM rules run (not run: the source breaks them) | 79 (12) | 276 (30) | 607 (52) |
+| broken | 0 | 0 | 1, OEVA OESEQ repeated; fixed, checked on OEVA, not rerun |
+| link: a member's timeline matches one synthetic subject | 0.081 | 0.044 | 0.017 |
+| membership accuracy (0.5 is chance) | 0.495 | 0.485 | 0.496 |
 
-Rules the bench28 members break, so not run: CM keys (3,557 of 4,132), OESEQ repeated (1,950 of 9,750), --DY not from RFSTDTC in EG, RS, TR, TU and DS and SC values outside the pilot's code lists (pharmaversesdtm's studies, spliced onto the pilot's subjects), dates outside their SV visit in DS, EX, LB, PC, RS, TR, 11 visits before the previous VISITNUM and one repeated SV visit, 4 EX records after RFXENDTC, RFXENDTC not the last EXENDTC (5), AESER against the serious criteria (13), PCSTRESN and QSSTRESN not the number in --STRESC, RSORRES given when NOT DONE, TRLNKGRP without an RS record, dates after DTHDTC (one subject).
-
-Not checked by any rule: clinical associations (placebo PK, weight within a subject, a medication with its adverse event; see the guide's Known limitations). No synthetic subject dies on bench28 (2 members died, under the 5-subject threshold), so the DTHDTC rules are never tested there.
-
-With 8 workers bench72 builds in 26 s; a 2,540-subject study generated from bench28 (3.3 million records, QS 1 million) builds in 126 s and generates in 81 s; its longest job is QS.
-
-Data: [CDISC pilot project](https://github.com/cdisc-org/sdtm-adam-pilot-project), study CDISCPILOT01.
+Data: [CDISC pilot project](https://github.com/cdisc-org/sdtm-adam-pilot-project), study CDISCPILOT01; [pharmaversesdtm](https://github.com/pharmaverse/pharmaversesdtm).
