@@ -5,8 +5,8 @@
 
 # Each synthetic subject copies the spine of one source subject, its donor (see spine.R):
 # their records in every dataset, with all dates, visits and record keys. Datasets are then
-# filled in the specification's order, the order their inputs assume. Last, the gaps between
-# visits are permuted among the synthetic subjects (`permute_gaps`).
+# filled in the specification's order, the order their inputs assume. Last, visit days are
+# drawn from the schedule and the other dates follow them (`schedule_dates()`).
 # R's default generator is set with the seed: background workers default to another one,
 # and the same seed must give the same data in the app, a worker or a script.
 generate_study <- function(study, n, seed = 1) {
@@ -15,7 +15,7 @@ generate_study <- function(study, n, seed = 1) {
   spine <- draw_spine(study$spine, spine_donors(study$spine, n), ids)
   built <- list()
   for (name in intersect(names(study$datasets), names(study$fits))) built[[name]] <- generate_dataset(study, name, built, spine)
-  list(data = permute_gaps(built), n = n, seed = seed)
+  list(data = schedule_dates(built, study$schedule), n = n, seed = seed)
 }
 
 # A dataset's records are its spine; its other values are drawn in graph order. Datasets not
@@ -63,8 +63,8 @@ generate_dataset <- function(study, name, built, spine) {
 # record keys, shifted, with subjects numbered), how SUPP-- variables unfold, and the trial
 # design datasets, which hold no subject data.
 study_bundle <- function(study, seed = 1) {
-  list(datasets = study$datasets, fits = study$fits, spine = study$spine, supp = study_supp(study), design = study_design(study),
-    define = study$source$define, seed = seed, created = Sys.time())
+  list(datasets = study$datasets, fits = study$fits, spine = study$spine, schedule = study$schedule, supp = study_supp(study),
+    design = study_design(study), define = study$source$define, seed = seed, created = Sys.time())
 }
 
 study_supp <- function(study) study$supp %||% study$source$supp

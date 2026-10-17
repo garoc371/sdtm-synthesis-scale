@@ -34,9 +34,10 @@ board_ui <- function(id) {
       full_screen = TRUE,
       card_header(uiOutput(ns("decisions_title"), inline = TRUE)),
       hint(
-        "What the policy and the starting graphs decided, by how many source records each",
-        "changes. A calculated variable follows its rule in every generated record; its source",
-        "exceptions are counted here. Open a dataset to change any of these."
+        "Decisions that make generated records differ from what the source would give, by how many",
+        "source records each changes: a rule that some source records break (generation follows the",
+        "rule), a rejected rule, a column not generated. Rules that every source record keeps, such as",
+        "a test name set by its code, are on each dataset's Rules tab. Open a dataset to change any of these."
       ),
       DTOutput(ns("decisions"), fill = FALSE)
     )
@@ -67,6 +68,7 @@ generation_card <- function(ns) {
       numericInput(ns("n_subjects"), "Subjects", 200, min = 1, step = 50),
       numericInput(ns("seed"), "Seed", 1, min = 1, step = 1)
     ),
+    uiOutput(ns("schedule")),
     div(
       class = "button-row",
       downloadButton(
@@ -81,7 +83,8 @@ generation_card <- function(ns) {
       )
     ),
     hint(
-      "The specification holds graphs and fitted parameters, no source records: ",
+      "The specification holds graphs, fitted parameters, the visit schedule and every source",
+      "subject's shifted records of keys, visits and dates: ",
       code("generate_study(readRDS(file), n, seed)"),
       "."
     )
@@ -96,6 +99,12 @@ board_server <- function(id, b, tick, step, open_dataset) {
     })
 
     # ---- Settings and downloads ---------------------------------------------------------
+
+    output$schedule <- renderUI({
+      tick()
+      req(b$study$source)
+      schedule_summary(b$study$schedule, names(study_design(b$study)))
+    })
 
     policy <- debounce(reactive(input$policy), 500)
     observeEvent(
@@ -229,16 +238,21 @@ board_server <- function(id, b, tick, step, open_dataset) {
     ledger <- reactive({
       built <- names(keys())[nzchar(keys())]
       x <- build_decisions(b)
-      if (!is.null(x)) x[x$dataset %in% built, ]
+      if (is.null(x)) return(NULL)
+      unchanged <- attr(x, "unchanged")
+      x <- x[x$dataset %in% built, ]
+      attr(x, "unchanged") <- sum(unchanged %in% built)
+      x
     })
     output$decisions_title <- renderUI({
       x <- ledger()
-      detail <- if (NROW(x)) {
+      detail <- if (!is.null(x)) {
         sprintf(
-          "%d in %d datasets · %d set by hand",
+          "%d change generated records, in %d datasets · %d set by hand · %d more give every source record its value",
           nrow(x),
           length(unique(x$dataset)),
-          sum(x$by == "hand")
+          sum(x$by == "hand"),
+          attr(x, "unchanged")
         )
       }
       tagList("Decisions", muted(detail))
@@ -462,6 +476,52 @@ inherited_note <- function(names) {
       input_button("open_dataset", name, class = "btn btn-link", name)
     }),
     " break SDTM rules about as often as the source does. Generated subjects copy the records of a source subject, so these come with them."
+  )
+}
+
+# How visit days are drawn: the window for day 1, and per scheduled visit its planned day and
+# the middle 90% of the source's deviations from it.
+schedule_summary <- function(schedule, design) {
+  if (is.null(schedule)) {
+    return(hint("Dates are the donors': there is no SV with visit numbers and RFSTDTC to draw visit days from."))
+  }
+  p <- schedule$planned
+  p <- p[as.character(p$visit) %in% names(schedule$deviation), ]
+  range <- vapply(as.character(p$visit), function(v) {
+    q <- schedule$deviation[[v]]
+    sprintf("%+g to %+g", round(q[6]), round(q[96]))
+  }, "")
+  tags$details(
+    class = "checked-rules",
+    tags$summary(sprintf(
+      "Visit days: %d scheduled visits, all visits between %s and %s",
+      nrow(p),
+      format(schedule$calendar[1]),
+      format(schedule$calendar[2])
+    )),
+    hint(
+      sprintf(
+        "Each visit falls on its planned day (%s) plus a deviation drawn from the source's at that visit.",
+        if ("TV" %in% design) "TV's VISITDY" else "the source's median day, as there is no TV"
+      ),
+      "Other dates follow the visits: one on a visit date stays on it, one between visits keeps its",
+      "distance to the nearer one. Day 1 (RFSTDTC) falls on a date that keeps the subject's visits",
+      "between the source's first and last SV date. Study days are then calculated from the dates."
+    ),
+    tags$table(
+      class = "table table-sm",
+      tags$thead(tags$tr(tags$th("Visit"), tags$th("Planned day"), tags$th("Middle 90% of deviations"))),
+      tags$tbody(lapply(seq_len(nrow(p)), function(i) {
+        tags$tr(
+          tags$td(
+            if (!is.na(p$name[i])) paste0(p$name[i], " (", format_value(p$visit[i]), ")") else format_value(p$visit[i]),
+            if (!is.na(p$arm[i])) paste(",", p$arm[i])
+          ),
+          tags$td(p$planned[i]),
+          tags$td(range[i], " days")
+        )
+      }))
+    )
   )
 }
 

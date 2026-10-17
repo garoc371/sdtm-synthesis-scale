@@ -106,62 +106,138 @@ draw_spine <- function(spine, donors, ids) {
   })
 }
 
-# After generation, the gaps between a subject's visits are permuted among the synthetic
-# subjects who have the same two visits in a row (screening to baseline, week 2 to week 4), so
-# a subject no longer has their donor's visit days. Every date of a subject moves with the
-# visits around it, through one map for all datasets, placed so that day 1 (RFSTDTC, the spine
-# anchor) stays: a date on a visit stays on that visit; a date between two visits keeps its
-# distance to the nearer one (on a tie, the one nearer day 1) when the gap grows, and when it shrinks as
-# long as that distance is within a quarter of the new gap, the dates in the middle being
-# squeezed; a date before the first or after the last visit keeps its distance to it. A gap
-# shrinks only as far as the subject's dates in it still fall on different days, so dates keep
-# their order, dates on one day stay on one day and dates on different days stay apart. A
-# study day moves with its date when it counts from RFSTDTC (in 99% of records); one that does
-# not, a planned day per visit, stays. synth.permute_gaps = FALSE keeps the donors' days.
-permute_gaps <- function(data, anchor = as.Date(getOption("synth.anchor", SPINE_ANCHOR))) {
+# The visit schedule, learnt on loading. Each scheduled visit has a planned study day: TV's
+# VISITDY (per arm when TV gives one), or without TV the median day the source's subjects
+# attended it, for the visits that mark progress and that at least SCHEDULED_SHARE of the
+# subjects attended (in the pilot, WEEK 26 has 36% of them, an unscheduled visit at most
+# 17%). How far the source's subjects were from it (their study day minus the planned day)
+# is kept as percentiles whose ends leave out the k subjects furthest either way (see
+# `number_margin()`). Visits without a planned day
+# (unscheduled, AE follow-up) are not scheduled: they move with the visits around them.
+# `calendar` is the first and last SV date of the source before the shift (`visit_window()`),
+# the study's first and last visit, which a protocol report gives anyway.
+SCHEDULED_SHARE <- 0.25
+
+visit_schedule <- function(data, design, calendar) {
   sv <- data[[VISIT_HUB]]
   date <- if (!is.null(sv)) main_date(VISIT_HUB, names(sv)) else NA
-  if (!getOption("synth.permute_gaps", TRUE) || is.na(date) || is.null(data$DM)) return(data)
-  sv <- sv[as.numeric(sv$VISITNUM) %in% progress_visits(sv) & !is.na(sv[[date]]), , drop = FALSE]
-  points <- data.frame(USUBJID = sv$USUBJID, visit = as.character(sv$VISITNUM), day = as.numeric(sv[[date]]))
+  if (is.na(date) || is.null(sv$VISITNUM) || is.null(data$DM$RFSTDTC)) return(NULL)
+  start <- as.numeric(data$DM$RFSTDTC[match(sv$USUBJID, data$DM$USUBJID)])
+  gap <- as.numeric(sv[[date]]) - start
+  x <- data.frame(USUBJID = sv$USUBJID, visit = as.numeric(sv$VISITNUM), day = gap + (gap >= 0),
+    arm = data$DM$ARMCD[match(sv$USUBJID, data$DM$USUBJID)] %||% NA_character_, stringsAsFactors = FALSE)
+  x <- x[!is.na(x$day) & !is.na(x$visit), , drop = FALSE]
+  tv <- design$TV
+  planned <- if (!is.null(tv$VISITDY) && any(!is.na(tv$VISITDY))) {
+    tv <- data.frame(visit = as.numeric(tv$VISITNUM), name = as.character(tv$VISIT %||% NA), arm = tv$ARMCD %||% NA_character_,
+      planned = as.numeric(tv$VISITDY), stringsAsFactors = FALSE)
+    tv[!is.na(tv$planned), , drop = FALSE]
+  } else {
+    attended <- tapply(sv$USUBJID, as.numeric(sv$VISITNUM), function(id) length(unique(id)))
+    common <- as.numeric(names(attended))[attended >= SCHEDULED_SHARE * length(unique(sv$USUBJID))]
+    x <- x[x$visit %in% intersect(progress_visits(sv), common), , drop = FALSE]
+    names <- if (!is.null(sv$VISIT)) tapply(as.character(sv$VISIT), as.numeric(sv$VISITNUM), most_common)
+    visits <- sort(unique(x$visit))
+    data.frame(visit = visits, name = if (is.null(names)) NA_character_ else unname(names[as.character(visits)]), arm = NA_character_,
+      planned = as.numeric(tapply(x$day, x$visit, stats::median)), stringsAsFactors = FALSE)
+  }
+  x$planned <- schedule_day(planned, x$visit, x$arm)
+  x <- x[!is.na(x$planned), , drop = FALSE]
+  if (!nrow(x)) return(NULL)
+  deviation <- lapply(split(x, x$visit), function(v) number_margin(v$day - v$planned, v$USUBJID))
+  list(planned = planned, deviation = deviation, calendar = calendar)
+}
+
+visit_window <- function(data) {
+  sv <- data[[VISIT_HUB]]
+  date <- if (!is.null(sv)) main_date(VISIT_HUB, names(sv)) else NA
+  if (!is.na(date) && any(!is.na(sv[[date]]))) range(sv[[date]], na.rm = TRUE)
+}
+
+# The planned day of each visit, for the subject's arm where TV has one.
+schedule_day <- function(planned, visit, arm) {
+  by_arm <- planned$planned[match(paste(visit, arm), paste(planned$visit, planned$arm))]
+  any_arm <- planned$planned[is.na(planned$arm)][match(visit, planned$visit[is.na(planned$arm)])]
+  ifelse(is.na(by_arm), any_arm, by_arm)
+}
+
+# After generation, each subject's visit days are drawn from the schedule: the planned day
+# plus a deviation drawn from the source's at that visit. Their other dates follow, through
+# one map for all datasets: a date on a visit (a DS date, an SE start, a findings record)
+# stays on that visit, a date between two visits (an adverse event) keeps its distance to the
+# nearer one, so it stays in its epoch (on a tie, the one nearer day 1; when the gap shrinks,
+# only within a quarter of the new gap, the dates in the middle being squeezed), and a date
+# before the first or after the last visit keeps its distance to it. A gap shrinks only as far
+# as the subject's dates in it still fall on different days, so dates keep their order, dates
+# on one day stay on one day and dates on different days stay apart. RFSTDTC stays day 1,
+# which then falls on a calendar date drawn so that the subject's visits lie between the
+# source's first and last visit. Every study day is then the SDTM one: the date minus
+# RFSTDTC, plus one from day 1 on. synth.schedule = FALSE keeps the donors' days, with day 1
+# on SPINE_ANCHOR.
+schedule_dates <- function(data, schedule, anchor = as.Date(SPINE_ANCHOR)) {
+  sv <- data[[VISIT_HUB]]
+  date <- if (!is.null(sv)) main_date(VISIT_HUB, names(sv)) else NA
+  if (!getOption("synth.schedule", TRUE) || is.null(schedule) || is.na(date) || is.null(data$DM)) return(data)
+  arm <- data$DM$ARMCD[match(sv$USUBJID, data$DM$USUBJID)] %||% rep(NA_character_, nrow(sv))
+  points <- data.frame(USUBJID = sv$USUBJID, visit = as.numeric(sv$VISITNUM), day = as.numeric(sv[[date]]), arm = arm,
+    stringsAsFactors = FALSE)
+  points$planned <- schedule_day(schedule$planned, points$visit, points$arm)
+  points <- points[!is.na(points$planned) & !is.na(points$day), , drop = FALSE]
   points <- points[order(points$USUBJID, points$day), , drop = FALSE]
   points <- points[!duplicated(points[c("USUBJID", "visit")]), , drop = FALSE]
-  first <- !duplicated(points$USUBJID)
-  key <- paste(c("", points$visit[-nrow(points)]), points$visit)
-  gap <- c(0, diff(points$day))
-  gap[!first] <- stats::ave(gap[!first], key[!first], FUN = function(g) g[sample.int(length(g))])
+  q <- do.call(rbind, schedule$deviation[as.character(points$visit)])
+  drawn <- points$planned + if (nrow(points)) round(quantile_draw(q)) else numeric()
+  points$new <- as.numeric(anchor) + drawn - (drawn > 0)
   dated <- Filter(function(x) "USUBJID" %in% names(x), data)
   days <- do.call(rbind, lapply(dated, function(x) do.call(rbind, lapply(Filter(function(v) inherits(v, "Date"), x),
     function(v) data.frame(USUBJID = x$USUBJID, day = as.numeric(v))))))
   days <- split(days$day[!is.na(days$day)], days$USUBJID[!is.na(days$day)])
-  visits <- split(data.frame(old = points$day, gap), factor(points$USUBJID, unique(points$USUBJID)))
-  maps <- do.call(rbind, Map(function(s, p) {
-    m <- day_map(c(days[[s]], as.numeric(anchor)), p$old, p$gap, as.numeric(anchor))
-    m$new <- m$new + as.numeric(anchor) - m$new[m$old == as.numeric(anchor)]
+  visits <- split(points, factor(points$USUBJID, data$DM$USUBJID))
+  attended <- split(as.numeric(sv[[date]]), factor(sv$USUBJID, data$DM$USUBJID))
+  window <- as.numeric(schedule$calendar)
+  a <- as.numeric(anchor)
+  maps <- do.call(rbind, Map(function(s, p, attended) {
+    d <- unique(c(days[[s]], a))
+    m <- if (nrow(p)) day_map(d, p$day, c(0, diff(p$new)), a) else data.frame(old = d, new = d)
+    m$new <- m$new + a - m$new[m$old == a]
+    # Day 1 on the calendar, so that the subject's visits lie within the source's.
+    seen <- c(m$new[m$old %in% attended], a)
+    first <- window[1] + a - min(seen)
+    last <- max(first, window[2] - (max(seen) - a))
+    m$new <- m$new - a + first + sample.int(last - first + 1, 1) - 1
     data.frame(USUBJID = s, m)
-  }, names(visits), visits))
+  }, names(visits), visits, attended))
   mapped <- paste(maps$USUBJID, maps$old)
-  lapply(data, function(x) {
-    columns <- names(Filter(function(v) inherits(v, "Date"), x))
-    if (!"USUBJID" %in% names(x) || !length(columns)) return(x)
-    start <- as.numeric(data$DM$RFSTDTC[match(x$USUBJID, data$DM$USUBJID)])
-    for (v in columns) {
+  data <- lapply(data, function(x) {
+    if (!"USUBJID" %in% names(x)) return(x)
+    for (v in names(Filter(function(v) inherits(v, "Date"), x))) {
       old <- as.numeric(x[[v]])
       new <- maps$new[match(paste(x$USUBJID, old), mapped)]
       new[is.na(new)] <- old[is.na(new)]
       x[[v]] <- as.Date(new, origin = "1970-01-01")
+    }
+    x
+  })
+  study_days(data)
+}
+
+# --DY, --STDY and --ENDY from their date and the subject's RFSTDTC, with no day 0.
+study_days <- function(data) {
+  lapply(data, function(x) {
+    if (!"USUBJID" %in% names(x) || is.null(data$DM$RFSTDTC)) return(x)
+    start <- as.numeric(data$DM$RFSTDTC[match(x$USUBJID, data$DM$USUBJID)])
+    for (v in names(Filter(function(v) inherits(v, "Date"), x))) {
       day <- sub("DTC$", "DY", v)
-      if (day != v && is.numeric(x[[day]]) && mean(old - start + (old >= start) == x[[day]], na.rm = TRUE) >= 0.99) {
-        moved <- x[[day]] + new - old
-        x[[day]] <- moved + ifelse(x[[day]] < 0 & moved >= 0, 1, ifelse(x[[day]] > 0 & moved <= 0, -1, 0))
-      }
+      if (day == v || !is.numeric(x[[day]])) next
+      gap <- as.numeric(x[[v]]) - start
+      x[[day]] <- gap + (gap >= 0)
     }
     x
   })
 }
 
 # One subject's map: their days (all dates, as numbers), and their visit days (old, in order)
-# with the permuted gaps that lead to them; each gap is widened to hold the days inside it.
+# with the drawn gaps that lead to them; each gap is widened to hold the days inside it.
 day_map <- function(days, old, gap, anchor) {
   days <- sort(unique(c(days, old)))
   g <- diff(old)

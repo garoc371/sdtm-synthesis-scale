@@ -83,9 +83,11 @@ save_cached <- function(dir, key, value) {
 load_study <- function(files, names = basename(files)) {
   source <- if (length(files) == 1 && dir.exists(files)) read_folder(files) else read_source(files, names)
   source <- organise_source(source)
+  calendar <- visit_window(source$data)
   source$data <- shift_dates(source$data)
   study <- new_study(source)
   study$spine <- spine_records(study)
+  study$schedule <- visit_schedule(study$source$data, study_design(study), calendar)
   study$hashes <- vapply(study$source$data, digest::digest, "", algo = "xxhash64")
   study$source_checks <- source_checks(study)
   study
@@ -302,8 +304,8 @@ generation_bundle <- function(b) {
     ds$include <- ds$name %in% names
     ds
   })
-  list(datasets = datasets, fits = study$fits[names], spine = study$spine, supp = study_supp(study), design = study_design(study),
-    define = study$source$define)
+  list(datasets = datasets, fits = study$fits[names], spine = study$spine, schedule = study$schedule, supp = study_supp(study),
+    design = study_design(study), define = study$source$define)
 }
 
 idle <- function(b) !length(b$queue) && !any(vapply(b$running, `[[`, "", "kind") %in% c("load", "build"))
@@ -403,6 +405,8 @@ build_status <- function(b) {
 # Every decision the policy and the starting specification made that changes what is
 # generated, with how many source records it affects: accepted rules that disagree with
 # some records (generation follows the rule), rejected rules, and variables not generated.
+# A rule that gives every source record its value, or a column left out that the source
+# leaves empty, changes nothing: those are counted (`unchanged`), not listed.
 build_decisions <- function(b) {
   rows <- lapply(b$study$datasets, function(ds) {
     rules <- Filter(function(r) r$status %in% c("accepted", "rejected"), ds$rules)
@@ -420,5 +424,8 @@ build_decisions <- function(b) {
   })
   rows <- do.call(rbind, rows)
   if (is.null(rows)) return(NULL)
-  rows[order(-rows$records), ]
+  listed <- rows$records > 0 | rows$by == "hand"
+  out <- rows[listed, ][order(-rows$records[listed]), ]
+  attr(out, "unchanged") <- rows$dataset[!listed]
+  out
 }

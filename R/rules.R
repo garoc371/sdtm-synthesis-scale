@@ -42,7 +42,7 @@ RULE_OPS <- list(
     find = function(target, info) if (info$values[[target]] == 1) list(character()),
     learn = function(rule, frame) list(value = most_common(frame[[rule$target]])),
     apply = function(rule, frame) rep(rule$params$value, nrow(frame)),
-    label = function(rule, input) sprintf("Constant \"%s\"", format_value(rule$params$value))),
+    label = function(rule, input) sprintf("Always \"%s\"", format_value(rule$params$value))),
   # In the source, the target only has to number each subject's records 1..n in some order;
   # generated records are numbered after sorting.
   sequence = list(name = "Sequence number", help = "No inputs: 1, 2, … within subject after sorting.",
@@ -150,7 +150,7 @@ RULE_OPS <- list(
       p <- rule$params
       offset <- any(p$table$offset != 0)
       if (is.null(p$by) && isTRUE(all.equal(p$table$factor, 1)) && !offset) return(paste("Copy of", input))
-      paste0(input, " × factor", if (offset) " + offset", if (!is.null(p$by)) paste(" by", p$by))
+      paste0(input, " converted", if (!is.null(p$by)) paste(" per", p$by), if (offset) " (factor and offset)" else " (factor)")
     }),
   lookup = list(name = "Lookup", help = "One or more key variables; the table is learned from the source.",
     groups = function(rule) rule$inputs,
@@ -200,7 +200,7 @@ RULE_OPS <- list(
       predicted <- held_out_prediction(group, y, record_subject(frame))
       list(match = !is.na(predicted) & predicted == y, checked = !is.na(predicted))
     },
-    label = function(rule, input) paste("Lookup by", paste(input, collapse = " and "))),
+    label = function(rule, input) paste("Set by", paste(feature_name(rule$inputs), collapse = " and "))),
   # Some tests are calculated from the other records of their group (see `derivation_groups()`):
   # a total from its items, a half-life from the rate constant, an overall response from the
   # target and non-target responses. The variable keeps its own rule or model for the other
@@ -263,6 +263,17 @@ rule_columns <- function(rule) unique(c(rule$inputs, rule$params$by))
 rule_label <- function(rule) RULE_OPS[[rule$op]]$label(rule, display_name(rule$inputs))
 
 display_name <- function(x) sub("^DM\\.", "", sub("^N\\.(.*)$", "number of \\1 records", x))
+
+# A spine feature in words, for rule labels (T.DIED: death); other columns as display_name().
+feature_name <- function(x) {
+  words <- c(T.DIED = "death", T.LASTVISIT = "last visit", T.TREATED = "treatment status", T.EXPOSED = "days exposed",
+    T.PHASE = "phase (before, during or after treatment)")
+  out <- ifelse(x %in% names(words), words[x], display_name(x))
+  out <- sub("^T\\.(.+)\\.KNOWN$", "\\1 known", out)
+  out <- sub("^T\\.(.+)=(.+)$", "\\1 on \\2", out)
+  out <- sub("^T\\.([A-Z0-9]+)\\.(.+)$", "having \\1 records of \\2", out)
+  unname(sub("^T\\.([A-Z0-9]+)$", "having \\1 records", out))
+}
 
 # Learn the rule's parameters from the frame (unless the user edited them), apply it, and
 # record the share of checked records it reproduces, overall and per test.
