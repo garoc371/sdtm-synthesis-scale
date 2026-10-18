@@ -2,15 +2,25 @@
 # whose rules we did not write: CORE is run on the members' real files (gen.R's split, written
 # as gen.R gives them to the app, Latin-1 text recoded to UTF-8) and on each seed's files as the
 # app writes them. Lists the CORE rules the members' files pass and a seed fails, with the first
-# failing records. Not part of run.sh.
-#   Rscript core.R <label> <seed files...>     (SHOW=1 also lists the rules the real files fail)
-#   CORE    the release executable, unpacked (default bench/core/core/core; v0.17.1 has an offline cache)
+# failing records. Not part of run.sh; run it after run.sh on the same label and folder.
+#   Rscript core.R <label> [data folder]     (seeds: OUT/<label>_seed*.rds; SHOW=1 also lists the rules the real files fail)
+#   CORE    the executable of CORE release v0.17.1 (core-mac-apple-silicon.zip or the Linux or
+#           Windows asset from github.com/cdisc-org/cdisc-rules-engine/releases, unzipped outside
+#           the repo), else `core` on PATH; without it the check is skipped
 #   SDTMIG  rule set (default 3-2, the oldest CORE has), CT  terminology package (default sdtmct-2026-03-27)
+core <- Sys.getenv("CORE", Sys.which("core"))
+if (!nzchar(core) || !file.exists(core)) {
+  cat("CORE check skipped: set CORE to, or put on PATH, the core executable of CDISC CORE v0.17.1 (github.com/cdisc-org/cdisc-rules-engine/releases)\n")
+  quit(status = 0)
+}
+args <- commandArgs(TRUE)
+if (!is.na(args[2])) Sys.setenv(DATA = args[2])
 source(file.path(dirname(normalizePath(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1]))), "common.R"))
 `%||%` <- function(a, b) if (is.null(a)) b else a
 for (f in c("source.R", "generate.R")) sys.source(file.path(REPO, "R", f), environment())
-args <- commandArgs(TRUE)
-core <- normalizePath(Sys.getenv("CORE", file.path(REPO, "bench", "core", "core", "core")))
+core <- normalizePath(core)
+version <- system2(core, "version", stdout = TRUE)[1]
+seed_files <- list.files(OUT, paste0("^", args[1], "_seed\\d+\\.rds$"), full.names = TRUE)
 members <- readRDS(file.path(OUT, paste0(args[1], "_split.rds")))$members
 work <- file.path(tempdir(), "core")
 real <- file.path(work, "real")
@@ -33,9 +43,9 @@ run <- function(dir) {
   list(status = status, message = setNames(r$Rules_Report$message, r$Rules_Report$core_id), issues = issues, details = r$Issue_Details)
 }
 ref <- run(real)
-seeds <- lapply(seq_along(args[-1]), function(i) {
+seeds <- lapply(seq_along(seed_files), function(i) {
   dir <- file.path(work, paste0("seed", i))
-  write_datasets(readRDS(args[-1][i])$data, dir, "xpt")
+  write_datasets(readRDS(seed_files[i])$data, dir, "xpt")
   run(dir)
 })
 failing <- c("ISSUE REPORTED", "EXECUTION ERROR")
@@ -48,8 +58,8 @@ for (i in seq_along(seeds)) {
 status <- as.matrix(out[grep("^seed", names(out))])
 out$broken <- out$real == "SUCCESS" & rowSums(matrix(status %in% failing, nrow(status))) > 0
 saveRDS(list(rules = out, real = ref$details, seeds = lapply(seeds, `[[`, "details")), file.path(OUT, paste0("core_", args[1], ".rds")))
-cat(sprintf("%s: CORE on SDTMIG %s; %d rules the members' files pass, of which the synthetic files fail %d\n",
-  args[1], Sys.getenv("SDTMIG", "3-2"), sum(out$real == "SUCCESS"), sum(out$broken)))
+cat(sprintf("%s: CORE %s on SDTMIG %s; %d rules the members' files pass, of which the synthetic files fail %d\n",
+  args[1], version, Sys.getenv("SDTMIG", "3-2"), sum(out$real == "SUCCESS"), sum(out$broken)))
 for (k in which(out$broken)) {
   id <- out$core_id[k]
   cat(sprintf("  %s  %s\n    seeds %s\n", id, out$message[k],
