@@ -16,8 +16,8 @@
 # default accepts every proposal: a rule keeps generated records coherent.
 POLICY_SHARE <- 0.9
 
-# The files a worker needs: no Shiny.
-CORE_FILES <- c("source.R", "domains.R", "supp.R", "rules.R", "spine.R", "study.R", "models.R", "generate.R", "review.R", "pipeline.R")
+# The files a worker needs: every file in R/ but the Shiny modules and helpers.
+core_files <- function(dir = "R") file.path(dir, grep("^(mod|ui)_", list.files(dir, "\\.R$"), invert = TRUE, value = TRUE))
 
 resolve_rules <- function(ds, share) {
   for (t in names(ds$rules)) if (identical(ds$rules[[t]]$origin, "found") && !isTRUE(ds$rules[[t]]$manual))
@@ -49,13 +49,13 @@ start_workers <- function(n, dir = "R") {
   mirai::daemons(0)
   mirai::daemons(n)
   invisible(mirai::collect_mirai(mirai::everywhere(for (f in files) sys.source(f, globalenv()),
-    files = normalizePath(file.path(dir, CORE_FILES)))))
+    files = normalizePath(core_files(dir)))))
   invisible(n)
 }
 
 content_key <- function(...) digest::digest(list(...), algo = "xxhash64")
 
-code_version <- function(dir = "R") content_key(lapply(file.path(dir, CORE_FILES), readLines), default_node_model(), min_subjects())
+code_version <- function(dir = "R") content_key(lapply(core_files(dir), readLines), default_node_model(), min_subjects())
 
 cache_file <- function(dir, key) file.path(dir, paste0(key, ".rds"))
 

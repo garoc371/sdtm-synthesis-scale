@@ -8,8 +8,8 @@ source(file.path(dirname(normalizePath(sub("^--file=", "", grep("^--file=", comm
 args <- commandArgs(TRUE)
 label <- args[1]; seeds <- as.integer(args[-(1:2)])
 setwd(REPO)
-for (f in c("source.R", "domains.R", "supp.R", "rules.R", "spine.R", "study.R", "models.R", "generate.R", "review.R", "pipeline.R"))
-  sys.source(file.path("R", f), globalenv())
+sys.source("R/pipeline.R", globalenv())
+for (f in core_files()) sys.source(f, globalenv())
 files <- list.files(DATA, full.names = TRUE)
 if (args[2] == "0") {
   d <- lapply(read_source(files)$data, function(x) { for (v in names(x)) if (inherits(x[[v]], "Date")) x[[v]] <- format(x[[v]]); x })

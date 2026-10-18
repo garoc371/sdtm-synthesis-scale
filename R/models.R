@@ -48,7 +48,7 @@ DEATH_KEY <- "^T[.](DIED|.*=DTHDTC)$"
 death_records <- function(frame, inputs) {
   died <- frame[["DM.DTHDTC"]]
   if (is.null(died)) return(all(grepl(DEATH_KEY, inputs)) & frame[["T.DIED"]] %in% "Y")
-  dates <- names(Filter(function(v) inherits(v, "Date"), frame))
+  dates <- date_columns(frame)
   same <- lapply(frame[dates[!grepl("^(DM|LINK)[.]", dates)]], function(v) as.numeric(v) == as.numeric(died))
   Reduce(`|`, lapply(same, `%in%`, TRUE), rep(FALSE, nrow(frame)))
 }
@@ -293,7 +293,7 @@ node_parts <- function(ds, variable, frame, previous) {
 # source's percentiles of the test). A trajectory's first record is fitted without the arm (it is measured before
 # treatment); later records add the previous recorded value, and a number also the mean of
 # the earlier ones (so it returns to the subject's level instead of drifting like a random
-# walk). A category also keeps its implications (see spine.R), and one value per subject in a
+# walk). A category also keeps its implications (see implications.R), and one value per subject in a
 # test where each subject has one, however many records of it they have.
 fit_node <- function(ds, variable, frame, arm) {
   node <- ds$nodes[[variable]]

@@ -116,9 +116,9 @@ date_orders <- function(data, partial) {
   holds <- function(a, b, ok) sum(ok) >= DATE_ORDER_RECORDS && mean(a[ok] <= b[ok]) >= DATE_ORDER_SHARE
   for (d in names(partial)) {
     x <- data[[d]]
-    dates <- names(Filter(function(v) inherits(v, "Date"), x))
+    dates <- date_columns(x)
     dm <- if (d != "DM") data$DM[match(x$USUBJID, data$DM$USUBJID), , drop = FALSE]
-    dm_dates <- if (d != "DM") names(Filter(function(v) inherits(v, "Date"), dm))
+    dm_dates <- if (d != "DM") date_columns(dm)
     for (v in names(partial[[d]])) {
       for (w in setdiff(dates, v)) {
         ok <- complete(d, v) & complete(d, w)
@@ -202,6 +202,8 @@ value_kind <- function(v) {
 parse_number <- function(v) if (is.numeric(v)) v else suppressWarnings(as.numeric(as.character(v)))
 
 format_value <- function(x) if (inherits(x, "Date")) format(x) else as.character(x)
+
+date_columns <- function(x) names(Filter(function(v) inherits(v, "Date"), x))
 
 level_string <- function(v) {
   s <- format_value(v)

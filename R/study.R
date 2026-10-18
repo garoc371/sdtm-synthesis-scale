@@ -200,7 +200,7 @@ subject_result_column <- function(x) grepl("^[A-Z][A-Z0-9]*[.][^.]+$", x) & !gre
 
 # A dataset's records with every DM variable joined as DM.<VAR>, record counts of earlier
 # datasets as N.<DATASET>, their subject results as <DATASET>.<TEST> (see `subject_results()`),
-# the linked record's columns as LINK.<VAR> and the spine features T.* (see spine.R). DM's frame has the
+# the linked record's columns as LINK.<VAR> and the spine features T.* (see spine_features.R). DM's frame has the
 # subject-level spine features. The record structure travels as an attribute.
 dataset_frame <- function(study, name, data = study$source$data) {
   x <- data[[name]]
