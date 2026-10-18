@@ -382,7 +382,17 @@ fit_node <- function(ds, variable, frame, arm) {
       rbind(fit_implications(fine[i], frame[i, , drop = FALSE], keys, !kept[i] | fine[i] %in% RARE, y[i]),
         derived_implications(ds, variable, y[i], frame[i, , drop = FALSE], keys, fine[i], !kept[i] | fine[i] %in% RARE)) else {
       out <- fit_implications(ifelse(is.na(y[i]), NA, "recorded"), frame[i, , drop = FALSE], keys)
-      if (NROW(out)) out[vapply(out$value, identical, TRUE, MISSING), , drop = FALSE]
+      if (NROW(out)) out <- out[vapply(out$value, identical, TRUE, MISSING), , drop = FALSE]
+      # A key level whose records hold no amount, only zero or missing (a placebo arm's drug
+      # concentrations), keeps none: an amount drawn there becomes the commoner of the two.
+      none <- fit_implications(ifelse(no_amount(y[i]), NONE, "amount"), frame[i, , drop = FALSE], keys)
+      if (NROW(none)) none <- none[none$kind == "forced" & vapply(none$value, identical, TRUE, NONE) &
+        !paste(none$key, none$level) %in% paste(out$key, out$level), , drop = FALSE]
+      if (NROW(none)) none$typed <- I(lapply(seq_len(nrow(none)), function(j) {
+        at <- level_string(frame[[none$key[j]]][i]) == none$level[[j]]
+        if (mean(is.na(y[i][at])) >= 0.5) NA else y[i][at & !is.na(y[i])][1]
+      }))
+      rbind(out, none)
     }
     if (!NROW(out)) return(NULL)
     within <- length(unique(parts$scale)) > 1

@@ -5,6 +5,13 @@
 
 MISSING <- "(missing)"
 RARE <- "(rare)"
+NONE <- "(no amount)"
+
+# Zero or missing: no amount of what a number measures.
+no_amount <- function(v) {
+  x <- suppressWarnings(as.numeric(v))
+  is.na(v) | !is.na(x) & x == 0
+}
 
 read_folder <- function(directory) {
   files <- list.files(directory, "\\.(xpt|sas7bdat|csv|xml)$", full.names = TRUE, ignore.case = TRUE)

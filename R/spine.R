@@ -1590,7 +1590,7 @@ implication_violations <- function(implications, values, frame) {
     within <- implications$within[i]
     rows <- if (is.null(within) || is.na(within)) TRUE else tests[[within]] == implications$part[i]
     bad <- bad | rows & if (implications$kind[i] == "forced")
-      key %in% implications$level[[i]] & s != implications$value[[i]] else s %in% implications$value[[i]] & !key %in% implications$level[[i]]
+      key %in% implications$level[[i]] & (if (identical(implications$value[[i]], NONE)) !no_amount(values) else s != implications$value[[i]]) else s %in% implications$value[[i]] & !key %in% implications$level[[i]]
   }
   bad
 }
@@ -1630,6 +1630,7 @@ apply_implications <- function(implications, values, frame, redraw) {
   forced <- implications[implications$kind == "forced", , drop = FALSE]
   for (i in seq_len(nrow(forced))) {
     rows <- implication_key(forced, i, level_string(frame[[forced$key[i]]])) %in% forced$level[[i]] & implication_rows(forced, i, frame)
+    if (identical(forced$value[[i]], NONE)) rows <- rows & !no_amount(values)
     values[rows] <- forced$typed[[i]]
   }
   values
