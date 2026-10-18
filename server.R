@@ -78,7 +78,13 @@ function(input, output, session) {
     ignoreInit = TRUE
   )
 
-  dataset_server("dataset", b, tick, current, change, step)
+  dataset <- dataset_server("dataset", current, dataset_reactives(b, tick, current))
+  observeEvent(dataset$changed(), change(dataset$changed()))
+  observeEvent(dataset$reset(), {
+    reset_dataset(b, dataset$reset())
+    step()
+    notify(paste(dataset$reset(), "is built by the policy again."))
+  })
 
   # The sidebar: the start page, the study overview and a search for one dataset.
   observeEvent(

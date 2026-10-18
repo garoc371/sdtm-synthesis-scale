@@ -38,6 +38,38 @@ board_reactives <- function(b, tick) {
   )
 }
 
+# What the open dataset's page shows. `current`: the open dataset.
+dataset_reactives <- function(b, tick, current) {
+  list(
+    study = reactive({
+      tick()
+      b$study
+    }),
+    share = reactive({
+      tick()
+      b$share
+    }),
+    generated = follow_build(b, tick, function(b) b$generated),
+    state = follow_build(b, tick, function(b) dataset_state(b, current()))
+  )
+}
+
+# The dataset's build and its failed checks.
+dataset_state <- function(b, ds) {
+  if (is.null(ds)) {
+    return(NULL)
+  }
+  failed <- function(x) {
+    if (!is.null(x)) x[x$Dataset == ds$name & x$Status == "failed", ]
+  }
+  list(
+    info = b$info[[ds$name]],
+    manual = ds$name %in% b$manual,
+    spec = failed(b$checks[[ds$name]]),
+    coherence = failed(b$coherence)
+  )
+}
+
 # The decisions of the datasets built so far.
 built_decisions <- function(b, keys) {
   built <- names(keys)[nzchar(keys)]
