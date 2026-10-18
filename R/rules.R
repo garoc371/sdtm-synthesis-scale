@@ -383,277 +383,6 @@ lookup_fit <- function(group, y_code, subject) {
   list(share = share, checked = total, explained = explained(share, if (total) max(tabulate(y_code[checked])) / total))
 }
 
-# ---- Calculations from other records ----------------------------------------------------
-
-# A test is calculated from the other tests of its group when the group's records give it
-# for SHARE_TO_PROPOSE of at least DERIVATION_RECORDS records. Lookups read tests with at
-# most DERIVATION_LEVELS values, and use at most DERIVATION_INPUTS of them.
-DERIVATION_RECORDS <- 10
-DERIVATION_LEVELS <- 20
-DERIVATION_INPUTS <- 3
-
-# A rule calculating some tests of a variable from other records is kept beside the
-# variable's own rule, under this name.
-group_rule_name <- function(variable) paste(variable, "from other records")
-
-group_rule <- function(ds, variable) {
-  rule <- ds$rules[[group_rule_name(variable)]]
-  if (!is.null(rule) && rule$status == "accepted") rule
-}
-
-# A rule's values, with the tests the variable's group rule calculates replaced.
-rule_values <- function(ds, rule, frame) {
-  values <- RULE_OPS[[rule$op]]$apply(rule, frame)
-  group <- group_rule(ds, rule$target)
-  if (rule$op == "group" || is.null(group)) return(values)
-  frame[[rule$target]] <- values
-  RULE_OPS$group$apply(group, frame)
-}
-
-# The records of a group: the subject's records at one visit, and of one category, specimen,
-# lesion group and evaluator where the dataset has these. A column recorded for some tests
-# and never for others (RSLNKGRP only on the overall response) would split the group.
-derivation_groups <- function(frame, target, prefix) {
-  s <- attr(frame, "structure")
-  tests <- format_value(frame[[s$test]])
-  columns <- intersect(c("USUBJID", s$visit, paste0(prefix, c("CAT", "SPEC", "LNKGRP", "EVAL", "EVALID"))), setdiff(names(frame), c(target, s$test)))
-  Filter(function(v) {
-    present <- tapply(!is.na(frame[[v]]), tests, mean)
-    !(min(present) == 0 && max(present) > 0)
-  }, columns)
-}
-
-# Numbers written with `digits` decimals agree when they round alike; numbers calculated
-# from rounded inputs (a half-life from a rounded rate constant) agree to 1e-6.
-close_number <- function(value, y, digits) {
-  ok <- abs(value - y) <= pmax(0.5 * 10^-digits, 1e-6 * abs(y)) + 1e-9
-  !is.na(ok) & ok
-}
-
-# Per group: the sum of the numbers of the records whose test is in `inputs`, how many
-# there are, and how many records.
-group_numbers <- function(x, tests, inputs, group, n) {
-  records <- which(tests %in% inputs)
-  use <- records[!is.na(x[records])]
-  sum <- numeric(n)
-  if (length(use)) {
-    s <- rowsum(x[use], group[use])
-    sum[as.integer(rownames(s))] <- s[, 1]
-  }
-  list(sum = sum, count = tabulate(group[use], n), records = tabulate(group[records], n))
-}
-
-# Per group, the value of each input test (a column per test); NA where the group has more
-# than one record of the test (a lesion group's diameters).
-group_values <- function(y, tests, inputs, group, n) {
-  t <- match(tests, inputs)
-  i <- which(!is.na(t))
-  cell <- group[i] + (t[i] - 1) * n
-  out <- matrix(MISSING, n, length(inputs), dimnames = list(NULL, inputs))
-  out[cell] <- level_string(y[i])
-  out[cell[duplicated(cell)]] <- NA
-  out
-}
-
-# One key per row of group values; NA when one is ambiguous or all are missing.
-values_key <- function(values) {
-  key <- do.call(paste, c(lapply(seq_len(ncol(values)), function(k) values[, k]), sep = "\r"))
-  key[rowSums(is.na(values)) > 0 | rowSums(values == MISSING, na.rm = TRUE) == ncol(values)] <- NA
-  key
-}
-
-# The value each record's key gives among the other half of the subjects (see
-# `held_out_prediction()`); NA where it gives none, or a missing value.
-held_out_lookup <- function(key, level, subject) {
-  value <- rep(NA_character_, length(key))
-  ok <- !is.na(key)
-  if (!any(ok)) return(value)
-  levels <- unique(level[ok])
-  value[ok] <- levels[held_out_prediction(match(key[ok], unique(key[ok])), match(level[ok], levels), subject[ok])]
-  value[value %in% MISSING] <- NA
-  value
-}
-
-# The derivation's value for each record of its test (`rows`), NA where its group lacks the
-# inputs. With `subject`, a lookup gives the value as text, learned from the other half of
-# the subjects.
-derive <- function(d, y, tests, group, subject = NULL) {
-  rows <- which(tests == d$test)
-  n <- max(group, 0L)
-  g <- group[rows]
-  if (d$kind == "lookup") {
-    key <- values_key(group_values(y, tests, d$inputs, group, n)[g, , drop = FALSE])
-    return(list(rows = rows, value = if (is.null(subject)) d$values[match(key, d$keys)] else
-      held_out_lookup(key, level_string(y[rows]), subject[rows])))
-  }
-  numbers <- group_numbers(parse_number(y), tests, d$inputs, group, n)
-  x <- numbers$sum[g]
-  value <- switch(d$kind, sum = x, linear = d$a * x + d$b, ratio = d$a / x)
-  value[!is.finite(value) | if (d$kind == "sum") numbers$count[g] == 0 else numbers$count[g] != 1 | numbers$records[g] != 1] <- NA
-  list(rows = rows, value = value)
-}
-
-derivation_label <- function(d) {
-  inputs <- if (length(d$inputs) > 3) sprintf("%s, … (%d tests)", paste(d$inputs[1:3], collapse = ", "), length(d$inputs)) else
-    paste(d$inputs, collapse = ", ")
-  paste(d$test, switch(d$kind,
-    sum = paste("= sum of", inputs),
-    linear = if (d$a == 1 && d$b == 0) paste("= copy of", inputs) else sprintf("= %s × %s%s", format(d$a), inputs,
-      if (d$b != 0) sprintf(" %s %s", if (d$b > 0) "+" else "−", format(abs(d$b))) else ""),
-    ratio = sprintf("= %s / %s", format(d$a), inputs),
-    lookup = sprintf("by %s (%d values)", inputs, length(d$keys))))
-}
-
-# Calculations of tests from the other records of their group, searched per test (except
-# `skip`, the tests the variable's own rule gives): the sum of some other tests (least squares
-# picks the tests, then single tests are added or dropped while that helps), a line through
-# or ratio to one other test, or a lookup by other tests' values. Each is scored by the records
-# it gives right less SHARE_TO_PROPOSE / (1 - SHARE_TO_PROPOSE) times those it gives wrong;
-# lookups on subjects they were not learned from. A test whose calculation would use itself
-# through others takes none; the calculations scoring highest choose first, then later tests.
-find_derivations <- function(frame, target, test, groups, skip = NULL) {
-  y <- frame[[target]]
-  if (inherits(y, "Date") || !test %in% names(frame)) return(list())
-  tests <- format_value(frame[[test]])
-  group <- group_index(frame, groups)
-  subject <- record_subject(frame)
-  x <- parse_number(y)
-  level <- level_string(y)
-  codes <- unique(tests[!is.na(tests)])
-  n <- max(group)
-  t <- match(tests, codes)
-  cell <- group + (t - 1) * n
-  number <- which(!is.na(x) & !is.na(t))
-  sums <- matrix(0, n, length(codes), dimnames = list(NULL, codes))
-  if (length(number)) {
-    s <- rowsum(x[number], cell[number])
-    sums[as.integer(rownames(s))] <- s[, 1]
-  }
-  counts <- matrix(tabulate(cell[number], n * length(codes)), n, dimnames = list(NULL, codes))
-  records <- matrix(tabulate(cell[!is.na(t)], n * length(codes)), n, dimnames = list(NULL, codes))
-  values <- group_values(y, tests, codes, group, n)
-  weight <- SHARE_TO_PROPOSE / (1 - SHARE_TO_PROPOSE)
-  levels <- tapply(level, factor(t, seq_along(codes)), function(v) length(unique(v)))
-  names(levels) <- codes
-  found <- list()
-  for (j in setdiff(codes, skip)) {
-    rows <- which(tests == j)
-    if (sum(!is.na(y[rows])) < DERIVATION_RECORDS || length(unique(y[rows][!is.na(y[rows])])) < 2) next
-    g <- group[rows]
-    yn <- x[rows]
-    others <- setdiff(codes, j)
-    digits <- decimals(y[rows])
-    best <- NULL
-    keep <- function(d, value, match) {
-      checked <- !is.na(value)
-      score <- sum(match & checked) - weight * sum(!match & checked)
-      share <- if (any(checked)) mean(match[checked]) else 0
-      common <- if (any(checked)) max(table(level[rows][checked])) / sum(checked) else 1
-      if (sum(checked) >= DERIVATION_RECORDS && share >= SHARE_TO_PROPOSE && explained(share, common) >= EXPLAINED_TO_PROPOSE &&
-        (is.null(best) || score > best$score)) best <<- c(d, list(score = score))
-    }
-    numeric <- sum(!is.na(yn)) >= DERIVATION_RECORDS
-    if (numeric && length(others)) {
-      S <- sums[g, others, drop = FALSE]
-      C <- counts[g, others, drop = FALSE]
-      # A sum of other tests.
-      ok <- !is.na(yn)
-      used <- others[colSums(C[ok, , drop = FALSE]) > 0]
-      if (length(used) && sum(ok) >= 3 * length(used)) {
-        beta <- qr.coef(qr(S[ok, used, drop = FALSE]), yn[ok])
-        chosen <- others %in% used[!is.na(beta) & beta > 0.5]
-        objective <- function(pred, count) {
-          match <- close_number(pred, yn, digits)
-          colSums(match & count > 0) - weight * colSums(!match & count > 0)
-        }
-        current <- objective(matrix(S %*% chosen), matrix(C %*% chosen))
-        repeat {
-          sign <- ifelse(chosen, -1, 1)
-          options <- objective(as.vector(S %*% chosen) + sweep(S, 2, sign, `*`), as.vector(C %*% chosen) + sweep(C, 2, sign, `*`))
-          if (max(options) <= current) break
-          chosen[which.max(options)] <- !chosen[which.max(options)]
-          current <- max(options)
-        }
-        if (any(chosen)) {
-          d <- list(test = j, kind = "sum", inputs = others[chosen], digits = digits)
-          value <- ifelse(as.vector(C %*% chosen) > 0, as.vector(S %*% chosen), NA)
-          keep(d, value, close_number(value, yn, digits))
-        }
-      }
-      # A line through, or a ratio to, one other test with one number in the group.
-      for (k in others) {
-        one <- C[, k] == 1 & records[g, k] == 1
-        input <- ifelse(one, S[, k], NA)
-        both <- which(!is.na(input) & !is.na(yn))
-        if (length(both) < DERIVATION_RECORDS) next
-        options <- list(c(1, 0))
-        if (length(unique(input[both])) > 1) {
-          line <- stats::lm.fit(cbind(input[both], 1), yn[both])$coefficients
-          near <- both[abs(yn[both] - cbind(input[both], 1) %*% line) <= stats::median(abs(yn[both] - cbind(input[both], 1) %*% line))]
-          if (length(unique(input[near])) > 1) line <- stats::lm.fit(cbind(input[near], 1), yn[near])$coefficients
-          options <- c(options, list(unname(line)))
-        }
-        nonzero <- both[input[both] != 0]
-        ratio <- if (length(nonzero)) stats::median(yn[nonzero] * input[nonzero])
-        for (kind in c("linear", "ratio")) for (o in if (kind == "linear") options else if (!is.null(ratio)) list(ratio)) {
-          if (anyNA(o)) next
-          raw <- if (kind == "linear") o[1] * input[both] + o[2] else o[1] / input[both]
-          if (!isTRUE(mean(abs(raw - yn[both]) <= 1e-3 * pmax(abs(yn[both]), 10^-digits), na.rm = TRUE) >= 0.5)) next
-          for (p in 3:6) {
-            a <- signif(o[1], p)
-            b <- if (kind == "linear") signif(o[2], p) else 0
-            value <- if (kind == "linear") a * input + b else ifelse(input != 0, a / input, NA)
-            keep(list(test = j, kind = kind, inputs = k, a = a, b = b, digits = digits), value, close_number(value, yn, digits))
-          }
-        }
-      }
-    }
-    # A lookup by other tests' values.
-    candidates <- others[levels[others] <= DERIVATION_LEVELS]
-    candidates <- candidates[colSums(values[g, candidates, drop = FALSE] != MISSING, na.rm = TRUE) >= DERIVATION_RECORDS]
-    if (levels[[j]] <= 2.5 * DERIVATION_LEVELS && length(candidates)) {
-      level_y <- level[rows]
-      score <- function(inputs) {
-        value <- held_out_lookup(values_key(values[g, inputs, drop = FALSE]), level_y, subject[rows])
-        match <- !is.na(value) & value == level_y
-        list(score = sum(match) - weight * sum(!is.na(value) & !match), value = value, match = match)
-      }
-      # Inputs are added one at a time, the best scoring first; a key of one input may be
-      # wrong too often to pass, and right with a second. The best prefix is kept.
-      inputs <- character()
-      while (length(inputs) < DERIVATION_INPUTS && length(rest <- setdiff(candidates, inputs))) {
-        options <- lapply(rest, function(k) score(c(inputs, k)))
-        fit <- options[[which.max(vapply(options, `[[`, 0, "score"))]]
-        inputs <- c(inputs, rest[which.max(vapply(options, `[[`, 0, "score"))])
-        key <- values_key(values[g, inputs, drop = FALSE])
-        keyed <- which(!is.na(key))
-        first <- keyed[lookup_rows(match(key[keyed], unique(key[keyed])), match(level_y[keyed], unique(level_y[keyed])))]
-        first <- first[!is.na(y[rows][first]) & subjects_holding(paste(key, level_y), subject[rows])[first] >= min_subjects()]
-        keep(list(test = j, kind = "lookup", inputs = inputs, keys = key[first], values = y[rows][first], digits = digits), fit$value, fit$match)
-      }
-    }
-    if (!is.null(best)) found[[j]] <- best
-  }
-  # Calculations from fewer tests choose first, then those giving more records right, then
-  # later tests; one that would use its own test is dropped.
-  kept <- list()
-  for (j in names(found)[order(lengths(lapply(found, `[[`, "inputs")), -vapply(found, `[[`, 0, "score"), -match(names(found), codes))]) {
-    if (!j %in% reachable(found[[j]]$inputs, function(v) unlist(lapply(kept[intersect(v, names(kept))], `[[`, "inputs"))))
-      kept[[j]] <- found[[j]]
-  }
-  # Calculated in order: inputs first.
-  order <- character()
-  while (length(order) < length(kept)) {
-    ready <- setdiff(names(kept)[vapply(kept, function(d) all(!d$inputs %in% setdiff(names(kept), order)), TRUE)], order)
-    order <- c(order, ready)
-  }
-  lapply(kept[order], function(d) {
-    d$score <- NULL
-    d$fixed <- if (is.character(y) && d$kind != "lookup") number_format(y[tests %in% d$test & !is.na(x)])
-    d
-  })
-}
-
 # ---- Discovery -------------------------------------------------------------------------
 
 # Records of randomly chosen whole subjects (sequence and record-selection rules work within
@@ -674,10 +403,10 @@ discovery_sample <- function(frame, cap) {
 }
 
 # Rules for a dataset frame. `targets` are the dataset's own variables; every frame column
-# may serve as an input. Every target is searched; candidates per target are ranked by share, then operation preference,
-# then checked records and fewer inputs, and are proposed for review. Above DISCOVERY_RECORDS
-# records the search runs on a sample of subjects and the shortlisted candidates are then
-# checked, and their tables learned, on every record.
+# may serve as an input. Every target is searched; candidates per target are ranked by
+# share, then operation preference, then checked records and fewer inputs, and are proposed
+# for review. Above DISCOVERY_RECORDS records the search runs on a sample of subjects and
+# the shortlisted candidates are then checked, and their tables learned, on every record.
 #
 # Mutual rules (ARMCD from ARM and ARM from ARMCD) cannot both hold in a generator. Later
 # columns choose first, since SDTM lists derived variables after their sources; a target
@@ -685,100 +414,134 @@ discovery_sample <- function(frame, cap) {
 discover_rules <- function(frame, targets, name) {
   targets <- targets[vapply(frame[targets], function(v) any(!is.na(v)), TRUE)]
   if (nrow(frame) < 2 || !length(targets)) return(list())
-  chosen <- list()
-  searched <- setdiff(targets, names(chosen))
-  # What a column is (kind, number of values, record numbering) is read from every record,
-  # which is cheap: a rare value or a few unnumbered subjects must not change it. The
-  # candidates are searched on `frame`, the sample.
   full <- frame
   frame <- discovery_sample(full, getOption("synth.discovery_records", DISCOVERY_RECORDS))
+  info <- discovery_info(full, frame, targets)
+  candidates <- unlist(lapply(targets, target_candidates, info = info), recursive = FALSE)
+  # The sample only shortlists: its best candidates per target are evaluated again on every
+  # record, so shares, checked records and learned tables (lookups) are the whole data's.
+  if (nrow(frame) < nrow(full)) candidates <- unlist(lapply(targets, verified_candidates, candidates = candidates,
+    rows = nrow(frame), full = full), recursive = FALSE)
+  chosen <- list()
+  for (target in rev(targets)) {
+    options <- Filter(function(r) r$target == target, candidates)
+    chosen[[target]] <- Find(function(r) !closes_cycle(target, rule_columns(r), chosen, rule_columns), options[rank_rules(options)])
+  }
+  rules <- chosen[intersect(targets, names(chosen))]
+  found <- group_rules(full, targets, rules, name)
+  rules[names(found)] <- found
+  rules
+}
+
+# What discovery reads about the columns. What a column is (kind, number of values, record
+# numbering) is read from every record (`full`), which is cheap: a rare value or a few
+# unnumbered subjects must not change it. The candidates are searched on `frame`, the sample.
+discovery_info <- function(full, frame, targets) {
   sampled <- nrow(frame) < nrow(full)
   s <- attr(frame, "structure")
   columns <- names(frame)
   kinds <- vapply(full, value_kind, "")
-  count_values <- function(x) vapply(x, function(v) length(unique(v[!is.na(v)])), 0L)
-  values <- count_values(full)
+  values <- distinct_values(full)
   numeric_like <- vapply(full, function(v) is.numeric(v) || mean(!is.na(parse_number(unique(v[!is.na(v)])))) >= 0.9, TRUE)
   # Arithmetic inputs are the record's own numbers (not DM.* or N.*).
   numbers <- columns[kinds == "numeric" & !grepl("^(DM|N)\\.", columns)]
-  # Lookup keys are categories shared by subjects: a table keyed by a measured value or by
-  # a subject's own code (SUBJID) cannot cover newly generated values, and one keyed by a
-  # record number (--SEQ, numbering each subject's records 1..n, or from 41 in OEOA where OE's
-  # numbering runs on: the dataset's record ids) only reflects the sort order.
-  # A number with more values than a category model keeps is drawn anew (DM.AGE), unless it
-  # is composed with the spine (VISITNUM, T.*) or counts records (N.*).
+  is_key <- key_columns(full, frame, kinds, values, numeric_like, sampled)
+  keys <- lookup_keys(columns[is_key], s, columns)
+  # Conversion inputs are columns of numbers, or text results that are mostly numbers (TRORRES).
+  convertible <- columns[numeric_like & kinds != "date" & !grepl("^(DM|N)\\.", columns)]
+  list(frame = frame, kinds = kinds, values = values, numeric_like = numeric_like,
+    missing = vapply(full, anyNA, TRUE), keys = keys, key_groups = lapply(keys, group_index, x = frame),
+    dates = columns[kinds == "date"], dm_dates = grep("^DM\\.", columns[kinds == "date"], value = TRUE),
+    record_dates = grep("^(DM|SV)\\.", columns[kinds == "date"], value = TRUE, invert = TRUE),
+    ranges = range_inputs(frame, numbers), conversions = conversion_inputs(frame, targets, convertible, columns[is_key & values < 20]),
+    slack = if (sampled) DISCOVERY_SLACK else 0)
+}
+
+distinct_values <- function(x) vapply(x, function(v) length(unique(v[!is.na(v)])), 0L)
+
+# Lookup keys are categories shared by subjects: a table keyed by a measured value or by
+# a subject's own code (SUBJID) cannot cover newly generated values, and one keyed by a
+# record number (--SEQ, numbering each subject's records 1..n, or from 41 in OEOA where OE's
+# numbering runs on: the dataset's record ids) only reflects the sort order. A number with
+# more values than a category model keeps is drawn anew (DM.AGE), unless it is composed with
+# the spine (VISITNUM, T.*) or counts records (N.*). Subjects per value are compared with the
+# values the sample shows, not with the whole.
+key_columns <- function(full, frame, kinds, values, numeric_like, sampled) {
+  s <- attr(frame, "structure")
+  columns <- names(frame)
   drawn <- vapply(full, is.numeric, TRUE) & values > MAX_DISCRETE_VALUES & !columns %in% s$spine & !grepl("^(T|N)\\.", columns)
   subject_values <- vapply(columns, function(v) max(group_index(frame, c("USUBJID", v))), 0L)
   numbered <- vapply(full, function(v) is.numeric(v) && !anyNA(v) &&
     all(stats::ave(v, full$USUBJID, FUN = function(s) rank(s, ties.method = "first")) == v), TRUE)
-  # Subjects per value are compared with the values the sample shows, not with the whole.
-  is_key <- kinds != "date" & !(numeric_like & values > 50) & !drawn & values >= 2 &
-    subject_values >= 2 * (if (sampled) count_values(frame) else values) & columns != "USUBJID" & !numbered & !columns %in% s$id
-  keys <- as.list(columns[is_key])
-  # Per-test and per-visit tables that also differ by a subject characteristic (ranges by
-  # sex, the dose by arm and visit).
-  for (by in intersect(c(s$test, s$visit), columns))
-    keys <- c(keys, lapply(grep("^DM\\.", columns[is_key], value = TRUE), function(k) c(by, k)))
-  # Values set by the schedule: a table by all the record keys (RSLNKGRP by visit, test and
-  # evaluator).
-  if (length(s$keys) > 1 && all(s$keys %in% columns)) keys <- c(keys, list(s$keys))
+  kinds != "date" & !(numeric_like & values > 50) & !drawn & values >= 2 &
+    subject_values >= 2 * (if (sampled) distinct_values(frame) else values) & columns != "USUBJID" & !numbered & !columns %in% s$id
+}
+
+# The keys lookups try: each key column; per test and per visit, a subject characteristic
+# too (ranges by sex, the dose by arm and visit); and all the record keys, for values set by
+# the schedule (RSLNKGRP by visit, test and evaluator).
+lookup_keys <- function(keys, s, columns) {
+  by_subject <- lapply(intersect(c(s$test, s$visit), columns), function(by) lapply(grep("^DM\\.", keys, value = TRUE), function(k) c(by, k)))
+  c(as.list(keys), unlist(by_subject, recursive = FALSE), if (length(s$keys) > 1 && all(s$keys %in% columns)) list(s$keys))
+}
+
+# Value, lower and upper limit: two numbers where the first is never above the second (and
+# sometimes below), and a third number between them in at least half the records.
+range_inputs <- function(frame, numbers) {
   limits <- Filter(function(p) {
     lo <- frame[[p[1]]]
     hi <- frame[[p[2]]]
     both <- !is.na(lo) & !is.na(hi)
     sum(both) >= 2 && all(lo[both] <= hi[both]) && any(lo[both] < hi[both])
   }, date_pairs(numbers, numbers))
-  ranges <- Filter(function(r) mean(frame[[r[1]]] >= frame[[r[2]]] & frame[[r[1]]] <= frame[[r[3]]], na.rm = TRUE) >= 0.5,
+  Filter(function(r) mean(frame[[r[1]]] >= frame[[r[2]]] & frame[[r[1]]] <= frame[[r[3]]], na.rm = TRUE) >= 0.5,
     unlist(lapply(limits, function(p) lapply(setdiff(numbers, p), c, p)), recursive = FALSE))
-  coded <- columns[is_key & values < 20]
-  conversions <- lapply(setNames(searched, searched), function(target) {
-    parsed <- !is.na(parse_number(frame[[target]]))
-    # Inputs are columns of numbers, or text results that are mostly numbers (TRORRES).
-    inputs <- columns[numeric_like & kinds != "date" & !grepl("^(DM|N)\\.", columns)]
-    usable <- vapply(inputs, function(x) sum(!is.na(parse_number(frame[[x]])) & parsed) >= 2, TRUE)
-    as.list(setdiff(inputs[usable], c(target, coded)))
-  })
-  info <- list(frame = frame, kinds = kinds, values = values, numeric_like = numeric_like,
-    missing = vapply(full, anyNA, TRUE), keys = keys, key_groups = lapply(keys, group_index, x = frame),
-    dates = columns[kinds == "date"], dm_dates = grep("^DM\\.", columns[kinds == "date"], value = TRUE),
-    record_dates = grep("^(DM|SV)\\.", columns[kinds == "date"], value = TRUE, invert = TRUE),
-    ranges = ranges, conversions = conversions, slack = if (sampled) DISCOVERY_SLACK else 0)
-  proposed <- function(r, slack = 0) isTRUE(r$share >= SHARE_TO_PROPOSE - slack && r$explained >= EXPLAINED_TO_PROPOSE - slack) && r$checked >= 2
-  # `rows` coarsens the checked records to a share of the frame: a sample's counts differ by
-  # a few records between candidates that tie on every record, and enumeration order then decides.
-  ranked <- function(options, rows = NULL) {
-    checked <- vapply(options, `[[`, 0, "checked")
-    order(-round(vapply(options, `[[`, 0, "share"), 3), match(vapply(options, `[[`, "", "op"), names(RULE_OPS)),
-      -if (is.null(rows)) checked else round(checked / rows, 2), lengths(lapply(options, `[[`, "inputs")))
-  }
-  candidates <- list()
-  for (target in searched) for (op in names(RULE_OPS)) {
-    inputs <- Filter(function(i) !target %in% i, RULE_OPS[[op]]$find(target, info))
-    found <- lapply(inputs, function(i) evaluate_rule(new_rule(target, op, i), frame))
-    candidates <- c(candidates, Filter(function(r) proposed(r, info$slack), found))
-  }
-  # The sample only shortlists: its best candidates per target are evaluated again on every
-  # record, so shares, checked records and learned tables (lookups) are the whole data's.
-  if (sampled) candidates <- unlist(lapply(searched, function(target) {
-    options <- Filter(function(r) r$target == target, candidates)
-    shortlist <- sort(utils::head(ranked(options, nrow(frame)), getOption("synth.discovery_shortlist", DISCOVERY_SHORTLIST)))
-    Filter(proposed, lapply(options[shortlist], function(r) evaluate_rule(new_rule(target, r$op, r$inputs), full)))
-  }), recursive = FALSE)
-  for (target in rev(searched)) {
-    options <- Filter(function(r) r$target == target, candidates)
-    chosen[[target]] <- Find(function(r) !target %in% reachable(rule_columns(r),
-      function(v) unlist(lapply(chosen[intersect(v, names(chosen))], rule_columns))), options[ranked(options)])
-  }
-  rules <- chosen[intersect(targets, names(chosen))]
-  # Tests calculated from the other records of their group, searched on every record, except
-  # the tests the variable's own rule already gives. The group must not be calculated from
-  # the variable.
-  if (!is.null(s$test) && s$test %in% columns) for (target in setdiff(targets, s$test)) {
+}
+
+# Per target, the inputs a unit conversion tries: those with a number in at least two of the
+# target's records with one, other than coded columns.
+conversion_inputs <- function(frame, targets, inputs, coded) lapply(setNames(targets, targets), function(target) {
+  parsed <- !is.na(parse_number(frame[[target]]))
+  usable <- vapply(inputs, function(x) sum(!is.na(parse_number(frame[[x]])) & parsed) >= 2, TRUE)
+  as.list(setdiff(inputs[usable], c(target, coded)))
+})
+
+# The rules each operation finds for `target` that pass the thresholds, less the sample's slack.
+target_candidates <- function(target, info) unlist(lapply(names(RULE_OPS), function(op) {
+  inputs <- Filter(function(i) !target %in% i, RULE_OPS[[op]]$find(target, info))
+  Filter(function(r) proposed_rule(r, info$slack), lapply(inputs, function(i) evaluate_rule(new_rule(target, op, i), info$frame)))
+}), recursive = FALSE)
+
+# The best of a target's candidates on the sample (`rows` records), evaluated on every record.
+verified_candidates <- function(target, candidates, rows, full) {
+  options <- Filter(function(r) r$target == target, candidates)
+  shortlist <- sort(utils::head(rank_rules(options, rows), getOption("synth.discovery_shortlist", DISCOVERY_SHORTLIST)))
+  Filter(proposed_rule, lapply(options[shortlist], function(r) evaluate_rule(new_rule(target, r$op, r$inputs), full)))
+}
+
+proposed_rule <- function(r, slack = 0) isTRUE(r$share >= SHARE_TO_PROPOSE - slack && r$explained >= EXPLAINED_TO_PROPOSE - slack) && r$checked >= 2
+
+# `rows` coarsens the checked records to a share of the frame: a sample's counts differ by
+# a few records between candidates that tie on every record, and enumeration order then decides.
+rank_rules <- function(options, rows = NULL) {
+  checked <- vapply(options, `[[`, 0, "checked")
+  order(-round(vapply(options, `[[`, 0, "share"), 3), match(vapply(options, `[[`, "", "op"), names(RULE_OPS)),
+    -if (is.null(rows)) checked else round(checked / rows, 2), lengths(lapply(options, `[[`, "inputs")))
+}
+
+# Tests calculated from the other records of their group, searched on every record, except
+# the tests the variable's own rule already gives. The group must not be calculated from
+# the variable.
+group_rules <- function(full, targets, rules, name) {
+  test <- attr(full, "structure")$test
+  if (is.null(test) || !test %in% names(full)) return(list())
+  targets <- setdiff(targets, test)
+  out <- lapply(setNames(targets, group_rule_name(targets)), function(target) {
     groups <- derivation_groups(full, target, name)
-    if (target %in% reachable(groups, function(v) unlist(lapply(rules[intersect(v, names(rules))], rule_columns)))) next
+    if (closes_cycle(target, groups, rules, rule_columns)) return(NULL)
     base <- rules[[target]]$by_test
-    rule <- evaluate_rule(new_rule(target, "group", c(s$test, groups), list(skip = base$test[base$share >= SHARE_TO_PROPOSE])), full)
-    if (length(rule$params$derivations) && proposed(rule)) rules[[group_rule_name(target)]] <- rule
-  }
-  rules
+    rule <- evaluate_rule(new_rule(target, "group", c(test, groups), list(skip = base$test[base$share >= SHARE_TO_PROPOSE])), full)
+    if (length(rule$params$derivations) && proposed_rule(rule)) rule
+  })
+  Filter(Negate(is.null), out)
 }
