@@ -52,7 +52,7 @@ generate_dataset <- function(study, name, built, spine) {
     if (node_type(ds, v) == "rule") frame[[v]] <- rule_values(ds, ds$rules[[v]], frame) else
       if (v %in% calculated) frame[[v]] <- RULE_OPS$group$apply(group_rule(ds, v), frame)
   }
-  frame <- sdtm_results(frame, ds$prefix)
+  frame <- sdtm_results(frame, ds$prefix, fits$nodes[[paste0(ds$prefix, "STRESN")]]$missing_text, s$test)
   for (v in setdiff(ds$variables, names(frame))) frame[[v]] <- switch(ds$kinds[[v]],
     date = as.Date(rep(NA, nrow(frame))), numeric = rep(NA_real_, nrow(frame)), rep(NA_character_, nrow(frame)))
   rownames(frame) <- NULL
@@ -60,16 +60,24 @@ generate_dataset <- function(study, name, built, spine) {
 }
 
 # SDTMIG result conventions: a test not done (--STAT) has no result and only it has a
-# reason (--REASND); --STRESN is --STRESC as a number.
-sdtm_results <- function(frame, prefix) {
+# reason (--REASND); --STRESN is --STRESC as a number, or --STRESC is --STRESN as text where
+# --STRESC is not generated (in full, and a missing number as the source's text for it in
+# its test: `missing_text`, from the --STRESN fit).
+sdtm_results <- function(frame, prefix, missing_text = NULL, test = NULL) {
   p <- function(v) paste0(prefix, v)
+  not_done <- rep(FALSE, nrow(frame))
   if (p("STAT") %in% names(frame)) {
     not_done <- frame[[p("STAT")]] %in% "NOT DONE"
     for (v in intersect(p(c("ORRES", "ORRESU", "STRESC", "STRESN", "STRESU")), names(frame))) frame[[v]][not_done] <- NA
     if (p("REASND") %in% names(frame)) frame[[p("REASND")]][!not_done] <- NA
   }
   if (all(p(c("STRESC", "STRESN")) %in% names(frame)))
-    frame[[p("STRESN")]] <- suppressWarnings(as.numeric(as.character(frame[[p("STRESC")]])))
+    frame[[p("STRESN")]] <- suppressWarnings(as.numeric(as.character(frame[[p("STRESC")]]))) else if (p("STRESN") %in% names(frame)) {
+    x <- frame[[p("STRESN")]]
+    by <- if (identical(names(missing_text), "")) rep("", nrow(frame)) else if (!is.null(test) && test %in% names(frame)) format_value(frame[[test]])
+    text <- if (length(missing_text) && !is.null(by)) unname(missing_text[by]) else rep(NA_character_, nrow(frame))
+    frame[[p("STRESC")]] <- ifelse(!is.na(x), as.character(x), ifelse(not_done, NA, text))
+  }
   frame
 }
 
@@ -92,10 +100,12 @@ study_design <- function(study) study$design %||% study$source$design
 output_datasets <- function(study, generated) c(unfold_supp(generated$data, study_supp(study)), study_design(study))
 
 # SDTM files hold ISO 8601 dates and empty text for missing values.
-write_outputs <- function(study, generated, directory, formats = c("xpt", "csv")) {
+write_outputs <- function(study, generated, directory, formats = c("xpt", "csv"))
+  write_datasets(output_datasets(study, generated), directory, formats)
+
+write_datasets <- function(data, directory, formats = c("xpt", "csv")) {
   dir.create(directory, showWarnings = FALSE, recursive = TRUE)
   files <- character()
-  data <- output_datasets(study, generated)
   for (name in names(data)) {
     x <- data[[name]]
     x[] <- lapply(x, function(v) if (is.numeric(v)) v else ifelse(is.na(v), "", format_value(v)))

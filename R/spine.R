@@ -214,6 +214,18 @@ compose_spine <- function(study, n, ids) {
       keep <- !is.na(value) & !is.na(composed$DM[[m]])
       composed$DM[[m]][keep] <- ctx$dm_syn[keep, m] <- value[keep]
     }
+    # A DM date bounding a dataset's first or last date moves to it where it is passed, once
+    # both that dataset and the one the date is taken from are composed; the latter's date
+    # moves with it.
+    for (r in derived$bounds) {
+      from <- ctx$derived[[r$date]]
+      if (!name %in% c(r$dataset, from$dataset) || !all(c(r$dataset, from$dataset) %in% names(composed))) next
+      value <- derived_value(composed, r, n)
+      over <- which(!is.na(value) & !is.na(composed$DM[[r$date]]) & (if (r$end == "max") value > ctx$dm_syn[, r$date] else value < ctx$dm_syn[, r$date]))
+      if (!length(over)) next
+      composed$DM[[r$date]][over] <- ctx$dm_syn[over, r$date] <- value[over]
+      if (!is.null(from)) composed[[from$dataset]] <- tie_date(composed[[from$dataset]], from, ctx$dm_syn[, r$date])
+    }
     se <- composed[[name]]
     if (name == "SE") o <- order(se$.j, as.numeric(se$SESTDTC %||% 0), as.numeric(se$SEENDTC %||% 0))
     for (r in Filter(function(r) r$dataset == name, derived$tied))
@@ -335,7 +347,9 @@ visit_span <- function(x, ctx) {
 # The DM dates taken from a dataset (`from`: SV where it gives one, as DMDTC its first visit),
 # and those other datasets' first or last dates
 # equal in at least DERIVED_SHARE of the source subjects that have both, at least
-# min_subjects() of them (`tied`: XD's last XDENDTC, a copy of EX's, at RFXENDTC).
+# min_subjects() of them (`tied`: XD's last XDENDTC, a copy of EX's, at RFXENDTC), and the
+# other datasets' first or last dates that are never after (before) a DM date in every source
+# subject that has both, at least min_subjects() of them (`bounds`: no visit after RFPENDTC).
 derived_dates <- function(study, dates) {
   spine <- study$spine
   N <- nrow(spine$DM)
@@ -371,7 +385,17 @@ derived_dates <- function(study, dates) {
         tied[[length(tied) + 1]] <- c(list(date = m), c[c("dataset", "variable", "end", "key", "level")])
     }
   }
-  list(from = out, tied = tied)
+  bounds <- list()
+  for (m in setdiff(dates, "RFSTDTC")) {
+    target <- as.numeric(spine$DM[[m]])
+    for (c in candidates) {
+      if (identical(out[[m]]$dataset, c$dataset)) next
+      both <- which(!is.na(target) & !is.na(c$value))
+      kept <- if (c$end == "max") c$value[both] <= target[both] else c$value[both] >= target[both]
+      if (length(both) >= min_subjects() && all(kept)) bounds[[length(bounds) + 1]] <- c(list(date = m), c[c("dataset", "variable", "end", "key", "level")])
+    }
+  }
+  list(from = out, tied = tied, bounds = bounds)
 }
 
 # Each subject's first ("min") or last ("max") date of `v`, for subjects 1 to `size`.

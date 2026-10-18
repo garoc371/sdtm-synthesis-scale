@@ -407,8 +407,17 @@ fit_node <- function(ds, variable, frame, arm) {
     if (isTRUE(node$prev)) " with previous values" else "", nrow(frame), if (level == "record") "records" else paste(level, "rows"),
     if (reduced) sprintf(", fewer predictors in %d of %d parts (few values)", reduced, length(fits)) else "",
     if (NROW(implications)) sprintf(", %d implication%s", nrow(implications), if (nrow(implications) > 1) "s" else "") else "")
+  # The text a missing --STRESN has in its test (PCSTRESC <BLQ), where every such record has
+  # the same one and at least min_subjects() subjects hold it.
+  result <- paste0(ds$prefix, "STRESC")
+  missing_text <- if (variable == paste0(ds$prefix, "STRESN") && result %in% names(frame)) unlist(lapply(by_test, function(i) {
+    i <- i[is.na(y[i])]
+    w <- frame[[result]][i]
+    if (length(w) && !anyNA(w) && length(unique(w)) == 1 && subjects_holding(w, frame$USUBJID[i])[1] >= min_subjects()) w[1]
+  }))
   list(parts = fits, arm = arm, description = description, implications = implications,
-    constant = if (level == "record" && !is.null(s$test)) intersect(constant_tests(frame, s$test, variable), names(types)[types == "categories"]))
+    constant = if (level == "record" && !is.null(s$test)) intersect(constant_tests(frame, s$test, variable), names(types)[types == "categories"]),
+    missing_text = missing_text)
 }
 
 # How a number was written: the decimals every value has (VSORRES "58.0"), or NA when they
