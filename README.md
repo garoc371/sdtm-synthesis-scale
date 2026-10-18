@@ -56,7 +56,7 @@ Two parts: the **spine** (when things happen) and the **content** (what the reco
 
 ## What is checked
 
-`sdtm_rules()` in `R/review.R` is a fixed list of SDTMIG rules: keys, subjects in DM, date order, study days, exposure dates, death, parent records (SUPP--, RELREC, --LNKID, --LNKGRP), visits against SV and TV, code/name pairs, results, trial design (TA, TE, EPOCH), AE flags, code lists.
+`sdtm_rules()` in `R/review.R` is a fixed list of SDTMIG rules: keys, subjects in DM, date order, study days, exposure dates, death, parent records (SUPP--, RELREC, --LNKID, --LNKGRP, PC to EX, PP to PC), visits against SV and TV, code/name pairs, results, trial design (TA, TE, EPOCH), AE flags, code lists.
 
 The same rules run on the source when it is loaded. A rule is run on the synthetic data only where the source keeps it in every record. Rules the source breaks are listed apart, not scored. No rule is mined from the data.
 

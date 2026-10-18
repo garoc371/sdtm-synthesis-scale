@@ -703,7 +703,8 @@ discover_rules <- function(frame, targets, name) {
   numbers <- columns[kinds == "numeric" & !grepl("^(DM|N)\\.", columns)]
   # Lookup keys are categories shared by subjects: a table keyed by a measured value or by
   # a subject's own code (SUBJID) cannot cover newly generated values, and one keyed by a
-  # record number (--SEQ, numbering each subject's records 1..n) only reflects the sort order.
+  # record number (--SEQ, numbering each subject's records 1..n, or from 41 in OEOA where OE's
+  # numbering runs on: the dataset's record ids) only reflects the sort order.
   # A number with more values than a category model keeps is drawn anew (DM.AGE), unless it
   # is composed with the spine (VISITNUM, T.*) or counts records (N.*).
   drawn <- vapply(full, is.numeric, TRUE) & values > MAX_DISCRETE_VALUES & !columns %in% s$spine & !grepl("^(T|N)\\.", columns)
@@ -712,7 +713,7 @@ discover_rules <- function(frame, targets, name) {
     all(stats::ave(v, full$USUBJID, FUN = function(s) rank(s, ties.method = "first")) == v), TRUE)
   # Subjects per value are compared with the values the sample shows, not with the whole.
   is_key <- kinds != "date" & !(numeric_like & values > 50) & !drawn & values >= 2 &
-    subject_values >= 2 * (if (sampled) count_values(frame) else values) & columns != "USUBJID" & !numbered
+    subject_values >= 2 * (if (sampled) count_values(frame) else values) & columns != "USUBJID" & !numbered & !columns %in% s$id
   keys <- as.list(columns[is_key])
   # Per-test and per-visit tables that also differ by a subject characteristic (ranges by
   # sex, the dose by arm and visit).

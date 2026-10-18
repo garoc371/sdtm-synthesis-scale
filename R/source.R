@@ -43,6 +43,9 @@ read_source <- function(files, names = basename(files)) {
       # SAS transport files are often Latin-1.
       if (is.character(v)) v[!validUTF8(v)] <- iconv(v[!validUTF8(v)], "latin1", "UTF-8")
       if (is.character(v)) v[grepl("^[ \t\r\n]*$", v)] <- NA
+      # Numbers to 15 significant digits: the same VISITNUM can be stored as 1.2 in SV and
+      # 1.2000000000000002 in LB, and must match.
+      if (is.double(v)) v <- signif(v, 15)
       v
     })
     x

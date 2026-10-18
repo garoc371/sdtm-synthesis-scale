@@ -28,10 +28,10 @@ CHECK_CATEGORIES <- list(
   days = list(label = "Study days", about = "--DY is the date minus RFSTDTC, plus one from day 1 on (there is no day 0)",
     fix = "No setting changes this: study days are calculated from each date and RFSTDTC after the visit days are drawn. Report it with the examples."),
   exposure = list(label = "Exposure", about = "EX dates fall within the subject's first and last exposure dates, and RFXSTDTC and RFXENDTC are EX's first and last",
-    fix = "No setting changes this: EX and DM dates are placed on the visit days, each from its own source subject. Report it with the examples."),
+    fix = "No setting changes this: EX dates are placed on the visit days and RFXSTDTC and RFXENDTC read from EX. Report it with the examples."),
   death = list(label = "Death", about = "DTHFL is Y exactly when DTHDTC is given and when DS has a DEATH record",
     fix = "Open DM and look at how DTHFL is made (Rules and Variables tabs)."),
-  links = list(label = "Parent records", about = "SUPP-- and RELREC records point to a record that exists, and --LNKID and --LNKGRP match a record of the subject in another dataset",
+  links = list(label = "Parent records", about = "SUPP-- and RELREC records point to a record that exists, and --LNKID and --LNKGRP match a record of the subject in another dataset, and a subject with PC records has EX records and one with PP records PC",
     fix = "No setting changes this: the links are made when the data are written. Report it with the examples."),
   visits = list(label = "Visits", about = "a record's visit is one of the subject's SV visits, with its name and dates; VISITDY is TV's; visits start in the order of VISITNUM",
     fix = "No setting changes this: visits and their days come from the time spine. Report it with the examples."),
@@ -199,8 +199,8 @@ sdtm_rules <- function(data, define = NULL) {
 # Rules on the study's structure, from SDTMIG's general assumptions and the trial design
 # datasets: visits as in SV and TV, one name per code, one standard unit per test, results,
 # the arm's path of elements in TA, EPOCH from the subject's elements, --LNKID and --LNKGRP
-# between datasets, and flags that name the same fact twice. `add`, `at_dm` and `text` are
-# sdtm_rules()'s.
+# between datasets, PC to EX and PP to PC, and flags that name the same fact twice. `add`,
+# `at_dm` and `text` are sdtm_rules()'s.
 structure_rules <- function(data, add, at_dm, text) {
   dm <- data$DM; sv <- data$SV; tv <- data$TV; ta <- data$TA; te <- data$TE; se <- data$SE
   # A record's collection date (--DTC, else --STDTC) and its start (--STDTC, else --DTC).
@@ -352,6 +352,14 @@ structure_rules <- function(data, add, at_dm, text) {
       add(n, "links", sprintf("%s matches a record in %s", column[[n]], paste(others, collapse = ", ")), ifelse(nzchar(id), paste(x$USUBJID, id) %in% known, NA),
         sprintf("%s %s = %s", x$USUBJID, column[[n]], id))
     }
+  }
+  # Pharmacokinetics: concentrations follow a dose and parameters are derived from
+  # concentrations, so a subject with PC records has EX records, and one with PP records PC.
+  for (v in list(c("PC", "EX"), c("PP", "PC"))) {
+    x <- data[[v[1]]]; y <- data[[v[2]]]
+    if (!is.null(x) && !is.null(y) && nrow(x) && "USUBJID" %in% names(x) && "USUBJID" %in% names(y))
+      add(v[1], "links", sprintf("Subject has %s records", v[2]), ifelse(is.na(x$USUBJID), NA, x$USUBJID %in% y$USUBJID),
+        sprintf("%s has no %s records", x$USUBJID, v[2]))
   }
   # Flags naming the same fact twice.
   ae <- data$AE

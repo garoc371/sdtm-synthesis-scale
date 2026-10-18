@@ -214,9 +214,13 @@ compose_spine <- function(study, n, ids) {
       keep <- !is.na(value) & !is.na(composed$DM[[m]])
       composed$DM[[m]][keep] <- ctx$dm_syn[keep, m] <- value[keep]
     }
+    se <- composed[[name]]
+    if (name == "SE") o <- order(se$.j, as.numeric(se$SESTDTC %||% 0), as.numeric(se$SEENDTC %||% 0))
     for (r in Filter(function(r) r$dataset == name, derived$tied))
       if (is.null(ctx$derived[[r$date]]) || ctx$derived[[r$date]]$dataset %in% names(composed))
         composed[[name]] <- tie_date(composed[[name]], r, ctx$dm_syn[, r$date], if (name != VISIT_HUB) visit_span(composed[[name]], ctx))
+    # A tie moves an element's start (the follow-up's to RFENDTC); the elements around it follow.
+    if (name == "SE") composed[[name]] <- chain_elements(composed[[name]], study$datasets[[name]]$prefix, o)
     if (name != VISIT_HUB) ctx$visit_dates[[name]] <- visit_dates(study, name, composed[[name]], ctx)
   }
   composed <- element_epochs(study, composed[names(spine)])
@@ -814,20 +818,7 @@ compose_records <- function(study, name, composed, ctx) {
     out[[v]] <- draw_dates(source_dates[[v]][first], from_src[first, , drop = FALSE], x$.subject[first], stratum_src[first],
       from_syn, out$.j, stratum_syn, ctx, unit_syn)
   }
-  # Elements in their order, each ending where the next starts.
-  if (elements) {
-    start <- paste0(ds$prefix, "STDTC")
-    end <- paste0(ds$prefix, "ENDTC")
-    if (start %in% names(out)) {
-      st <- stats::ave(ifelse(is.na(out[[start]]), -Inf, out[[start]]), out$.j, FUN = cummax)
-      out[[start]] <- ifelse(is.finite(st), st, NA)
-      if (end %in% names(out)) {
-        following <- c(out[[start]][-1], NA)
-        following[c(out$.j[-1] != out$.j[-nrow(out)], TRUE)] <- NA
-        out[[end]] <- ifelse(is.na(following), pmax(out[[end]], out[[start]]), following)
-      }
-    }
-  }
+  if (elements) out <- chain_elements(out, ds$prefix)
   for (v in setdiff(columns, names(out))) out[[v]] <- x[[v]][rep(NA_integer_, nrow(out))]
   if (!is.null(target)) out <- out[is.na(out[[link$key]]) | paste(out$.j, out[[link$key]]) %in% paste(target$.j, target[[link$by]]), , drop = FALSE]
   # Records the source never repeats within a subject are not repeated.
@@ -884,6 +875,23 @@ draw_elements <- function(x, code, ta, arm_src, arm_syn, ctx) {
     data.frame(.j = rep(j, length(e)), code = unname(cd))
   })
   do.call(rbind, out) %||% data.frame(.j = integer(), code = integer())
+}
+
+# SE's elements in order `o` (rows in their order by default), each starting no earlier than
+# the one before and ending where the next starts.
+chain_elements <- function(x, prefix, o = seq_len(nrow(x))) {
+  start <- paste0(prefix, "STDTC")
+  end <- paste0(prefix, "ENDTC")
+  if (!nrow(x) || !start %in% names(x)) return(x)
+  j <- x$.j[o]
+  st <- stats::ave(ifelse(is.na(x[[start]][o]), -Inf, x[[start]][o]), j, FUN = cummax)
+  x[[start]][o] <- ifelse(is.finite(st), st, NA)
+  if (end %in% names(x)) {
+    following <- c(x[[start]][o][-1], NA)
+    following[c(j[-1] != j[-length(j)], TRUE)] <- NA
+    x[[end]][o] <- ifelse(is.na(following), pmax(x[[end]][o], x[[start]][o]), following)
+  }
+  x
 }
 
 # Each subject's actual arm (ACTARMCD), else the planned one (ARMCD), as in TA.
