@@ -1,9 +1,4 @@
-# A dataset's Rules tab: what each module returns, on the pilot study's DM. Its rules are
-# STUDYID, DOMAIN, DTHFL (a lookup), AGEU and COUNTRY, all accepted.
-
-study <- load_study(test_path("../../data/pilot/dm.xpt"))
-dm <- resolve_rules(discover_dataset(study, "DM")$datasets$DM, 1)
-reactives <- list(dataset = reactive(dm), study = reactive(study), share = reactive(1))
+# A dataset's Rules tab: what each module returns, on the pilot study's DM.
 
 test_that("a rule rejected and given back to the policy", {
   testServer(rule_list_server, args = reactives, {

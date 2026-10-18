@@ -95,8 +95,6 @@ rule_list_server <- function(id, dataset, study, share) {
   })
 }
 
-is_manual <- function(rule) isTRUE(rule$manual)
-
 # Rules set by hand first, then found ones by their reproduced share.
 shown_rules <- function(rules) {
   origin <- vapply(

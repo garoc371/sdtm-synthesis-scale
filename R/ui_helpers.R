@@ -181,6 +181,9 @@ compact_table <- function(
   )
 }
 
+# Whether a rule or node was set by hand.
+is_manual <- function(x) isTRUE(x$manual)
+
 notify <- function(text, type = "message") {
   showNotification(text, type = type, duration = if (type == "error") 10 else 5)
 }

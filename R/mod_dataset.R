@@ -7,9 +7,9 @@ dataset_ui <- function(id) {
     uiOutput(ns("header")),
     uiOutput(ns("problems")),
     navset_underline(
-      nav_panel("Graph", graph_ui(ns("nodes"))),
+      nav_panel("Graph", graph_ui(ns("graph"))),
       nav_panel("Rules", rules_ui(ns("rules"))),
-      nav_panel("Variables", variables_ui(ns("nodes"))),
+      nav_panel("Variables", variables_ui(ns("variables"))),
       nav_panel("Compare", uiOutput(ns("compare")))
     )
   )
@@ -112,20 +112,20 @@ dataset_server <- function(id, b, tick, current, change, step) {
       )
     })
 
-    rules <- rules_server(
-      "rules",
-      current,
-      reactive({
-        tick()
-        b$study
-      }),
-      reactive({
-        tick()
-        b$share
-      })
+    study <- reactive({
+      tick()
+      b$study
+    })
+    share <- reactive({
+      tick()
+      b$share
+    })
+    changed <- merge_events(
+      rules_server("rules", current, study, share),
+      graph_server("graph", current, study),
+      variables_server("variables", current, study)
     )
-    observeEvent(rules(), change(rules()))
-    nodes_server("nodes", b, current, change, notify)
+    observeEvent(changed(), change(changed()))
 
     # ---- Compare --------------------------------------------------------------------------
 
