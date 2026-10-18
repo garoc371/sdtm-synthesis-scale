@@ -1,6 +1,7 @@
 # Build the study from a random half of the subjects in DATA (the members) with the app's
 # code and generate n subjects (default: as many as there are members) for several seeds;
-# the other half (held out) is the reference for relations and privacy. With n = 0, write
+# the other half (held out) is the reference for relations and privacy. The first seed is
+# generated twice to check that the output is reproducible. With n = 0, write
 # all of the real data as the app reads it (partial dates imputed) instead.
 #   Rscript gen.R <label> <n | members> <seeds...>     (SPLIT=1 picks the half; SYNTH_MODEL=tree for trees)
 source(file.path(dirname(normalizePath(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1]))), "common.R"))
@@ -36,8 +37,13 @@ start_load(b, list.files(dir, full.names = TRUE))
 run_build(b)
 print(build_status(b)[c("dataset", "stage", "message")])
 bundle <- build_bundle(b)
+out <- list()
 for (s in seeds) {
-  g <- generate_study(bundle, n, s)
-  saveRDS(list(data = output_datasets(bundle, g)), file.path(OUT, sprintf("%s_seed%d.rds", label, s)))
+  out[[s]] <- output_datasets(bundle, generate_study(bundle, n, s))
+  saveRDS(list(data = out[[s]]), file.path(OUT, sprintf("%s_seed%d.rds", label, s)))
   cat(label, "seed", s, "written\n")
 }
+# Reproducible: the same bundle, n and seed give the same output again.
+again <- output_datasets(bundle, generate_study(bundle, n, seeds[1]))
+differ <- union(setdiff(names(again), names(out[[seeds[1]]])), names(again)[!mapply(identical, again, out[[seeds[1]]][names(again)])])
+cat(sprintf("%s seed %d generated again: %s\n", label, seeds[1], if (length(differ)) paste("differs in", paste(differ, collapse = ", ")) else "identical"))

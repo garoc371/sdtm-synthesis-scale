@@ -37,12 +37,12 @@ CHECK_CATEGORIES <- list(
     fix = "No setting changes this: visits and their days come from the time spine. Report it with the examples."),
   names = list(label = "Names", about = "a code and its name pair one to one (--TESTCD and --TEST, ARMCD and ARM, VISITNUM and VISIT, ...), a dictionary term has one body system and a test one standard unit",
     fix = "Open the dataset and look at how the name or unit column is made (Rules and Variables tabs)."),
-  results = list(label = "Results", about = "--STRESN is --STRESC as a number, and a test not done has no result",
+  results = list(label = "Results", about = "--STRESN is --STRESC as a number, a test not done has no result, and --NRIND is LOW, NORMAL or HIGH as the result is below, within or above its reference range (--STNRLO to --STNRHI, or --ORNRLO to --ORNRHI)",
     fix = "Open the dataset and look at how the result columns are made (Rules and Variables tabs)."),
   design = list(label = "Trial design", about = "arms are TA's and elements TE's, each subject's elements follow the arm's path in TA one after the other, and EPOCH is that of the element holding the date",
     fix = "No setting changes this: elements and epochs come from the time spine. Report it with the examples."),
-  flags = list(label = "Flags", about = "AESER is Y exactly when a serious criterion is, and AEOUT is FATAL exactly when AESDTH is Y",
-    fix = "Open AE and look at how the flag columns are made (Rules and Variables tabs)."),
+  flags = list(label = "Flags", about = "AESER is Y exactly when a serious criterion is, AEOUT is FATAL exactly when AESDTH is Y, and --BLFL and --LOBXFL are Y on at most one record per subject and test, on or before RFXSTDTC",
+    fix = "Open the dataset and look at how the flag columns are made (Rules and Variables tabs)."),
   codes = list(label = "Code lists", about = "values are in the define.xml's code list for the variable",
     fix = "Open the dataset and look at how the column is made (Variables tab): sampled values and rule results come from the source.")
 )
@@ -199,7 +199,7 @@ sdtm_rules <- function(data, define = NULL) {
 # Rules on the study's structure, from SDTMIG's general assumptions and the trial design
 # datasets: visits as in SV and TV, one name per code, one standard unit per test, results,
 # the arm's path of elements in TA, EPOCH from the subject's elements, --LNKID and --LNKGRP
-# between datasets, PC to EX and PP to PC, and flags that name the same fact twice. `add`,
+# between datasets, PC to EX and PP to PC, baseline flags, and flags that name the same fact twice. `add`,
 # `at_dm` and `text` are sdtm_rules()'s.
 structure_rules <- function(data, add, at_dm, text) {
   dm <- data$DM; sv <- data$SV; tv <- data$TV; ta <- data$TA; te <- data$TE; se <- data$SE
@@ -252,7 +252,34 @@ structure_rules <- function(data, add, at_dm, text) {
           ok, sprintf("%s %s = %s, %s = %s", who, stat, text(x[[stat]]), v, text(x[[v]])))
       }
     }
+    # --NRIND is where the result falls in its reference range, in standard units, or in
+    # original ones where given (SDTMIG allows either); run where --NRIND and the standard
+    # result and limits are all given.
+    flag_of <- function(v) if (!anyNA(v)) {
+      y <- lapply(x[v], function(z) suppressWarnings(as.numeric(text(z))))
+      ifelse(y[[1]] < y[[2]], "LOW", ifelse(y[[1]] > y[[3]], "HIGH", "NORMAL"))
+    }
+    standard <- flag_of(c(p("STRESN"), p("STNRLO"), p("STNRHI")))
+    if (!is.na(p("NRIND")) && !is.null(standard)) {
+      original <- flag_of(c(p("ORRES"), p("ORNRLO"), p("ORNRHI"))) %||% rep(NA, nrow(x))
+      given <- toupper(text(x[[p("NRIND")]]))
+      add(name, "results", sprintf("%s agrees with the reference range", p("NRIND")),
+        ifelse(nzchar(given) & !is.na(standard), given == standard | given %in% original, NA),
+        sprintf("%s %s = %s, standard result gives %s, original %s", who, p("NRIND"), given, standard, text(original)))
+    }
     if (!"USUBJID" %in% names(x)) next
+    # Baseline: --BLFL and --LOBXFL are Y on at most one record per subject and test, on or
+    # before the first exposure.
+    test <- c("USUBJID", stats::na.omit(c(p("TESTCD"), p("CAT"), p("SPEC"), p("LOC"), p("POS"))))
+    for (flag in stats::na.omit(c(p("BLFL"), p("LOBXFL")))) if (!is.na(p("TESTCD"))) {
+      y <- x[[flag]] %in% "Y"
+      k <- do.call(paste, c(lapply(x[test], text), sep = " / "))
+      add(name, "flags", sprintf("%s = Y once per %s", flag, paste(test, collapse = ", ")), ifelse(y, !k %in% k[y][duplicated(k[y])], NA),
+        sprintf("%s has more than one %s = Y", k, flag))
+      d <- date_of(x, c("", "ST")); first <- at_dm(x, "RFXSTDTC")
+      add(name, "flags", sprintf("%s = Y on or before RFXSTDTC", flag), ifelse(y & !is.na(d) & !is.na(first), d <= first, NA),
+        sprintf("%s %s on %s, RFXSTDTC %s", who, flag, text(d), text(first)))
+    }
     # Visits: a record's visit is one of the subject's SV visits, with its name and dates.
     if ("VISITNUM" %in% names(x) && !is.null(sv) && !name %in% c("SV", "TV")) {
       at <- match(paste(x$USUBJID, x$VISITNUM), paste(sv$USUBJID, sv$VISITNUM))
