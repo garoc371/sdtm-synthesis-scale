@@ -13,18 +13,10 @@ function(input, output, session) {
   selected <- reactiveVal(NULL)
   current <- reactiveVal(NULL)
 
-  notify <- function(text, type = "message") {
-    showNotification(
-      text,
-      type = type,
-      duration = if (type == "error") 10 else 5
-    )
-  }
-
   # One poll of the build. The open dataset is replaced only when it changed, so that its
   # page does not redraw while other datasets build.
   step <- function() {
-    changed <- guarded(notify, build_step(b))
+    changed <- guarded(build_step(b))
     if (isTRUE(changed)) {
       tick(tick() + 1)
     }
@@ -86,7 +78,7 @@ function(input, output, session) {
     ignoreInit = TRUE
   )
 
-  dataset_server("dataset", b, tick, current, change, step, notify)
+  dataset_server("dataset", b, tick, current, change, step)
 
   # The sidebar: the start page, the study overview and a search for one dataset.
   observeEvent(

@@ -15,7 +15,7 @@ dataset_ui <- function(id) {
   )
 }
 
-dataset_server <- function(id, b, tick, current, change, step, notify) {
+dataset_server <- function(id, b, tick, current, change, step) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     # The dataset's build and its failed checks, redrawn only when they change.
@@ -112,7 +112,19 @@ dataset_server <- function(id, b, tick, current, change, step, notify) {
       )
     })
 
-    rules_server("rules", b, current, change, notify)
+    rules <- rules_server(
+      "rules",
+      current,
+      reactive({
+        tick()
+        b$study
+      }),
+      reactive({
+        tick()
+        b$share
+      })
+    )
+    observeEvent(rules(), change(rules()))
     nodes_server("nodes", b, current, change, notify)
 
     # ---- Compare --------------------------------------------------------------------------

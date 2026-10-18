@@ -133,7 +133,7 @@ nodes_server <- function(id, b, current, change, notify) {
 
     # A newly sampled variable joins the end of the ordering, with no predictors yet.
     set_type <- function(type) {
-      guarded(notify, {
+      guarded({
         ds <- current()
         for (v in req(selected())) {
           ds$nodes[[v]][c("type", "manual")] <- list(type, TRUE)
@@ -216,7 +216,7 @@ nodes_server <- function(id, b, current, change, notify) {
     })
     observeEvent(
       input$save_settings,
-      guarded(notify, {
+      guarded({
         ds <- current()
         if (ds$name != "DM") {
           ds$include <- isTRUE(input$include)
@@ -235,7 +235,7 @@ nodes_server <- function(id, b, current, change, notify) {
 
     observeEvent(
       input$rebuild,
-      guarded(notify, {
+      guarded({
         ds <- current()
         change(starting_graph(b$study, ds))
         notify(paste("Rebuilt the starting graph for", ds$name))
@@ -348,7 +348,7 @@ nodes_server <- function(id, b, current, change, notify) {
     })
     observeEvent(
       input$apply,
-      guarded(notify, {
+      guarded({
         ds <- current()
         v <- req(node())
         n <- ds$nodes[[v]]

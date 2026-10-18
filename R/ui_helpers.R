@@ -181,8 +181,12 @@ compact_table <- function(
   )
 }
 
+notify <- function(text, type = "message") {
+  showNotification(text, type = type, duration = if (type == "error") 10 else 5)
+}
+
 # Run an action and report errors as a notification instead of ending the session.
-guarded <- function(notify, expr) {
+guarded <- function(expr) {
   tryCatch(expr, error = function(e) {
     if (inherits(e, "shiny.silent.error")) {
       return(invisible())
@@ -199,12 +203,20 @@ changes <- function(compute) {
   value
 }
 
-# Several event reactives as one, such as clicks from different cards: the value of the
-# last that fired. A count goes with it, so that the same value twice is still an event.
-merge_events <- function(...) {
+# An event a module sends with `send(x)`; `value()` fires with x, also when x is the same as
+# the last one, since a count goes with it.
+new_event <- function() {
   last <- reactiveVal(list(n = 0))
-  lapply(list(...), function(event) {
-    observeEvent(event(), last(list(n = last()$n + 1, value = event())))
-  })
-  reactive(req(last()$value))
+  list(
+    send = function(x) last(list(n = isolate(last()$n) + 1, value = x)),
+    value = reactive(req(last()$value))
+  )
+}
+
+# Several event reactives as one, such as clicks from different cards: the value of the
+# last that fired.
+merge_events <- function(...) {
+  event <- new_event()
+  lapply(list(...), function(e) observeEvent(e(), event$send(e())))
+  event$value
 }
