@@ -198,3 +198,13 @@ changes <- function(compute) {
   observe(value(compute()), priority = 100)
   value
 }
+
+# Several event reactives as one, such as clicks from different cards: the value of the
+# last that fired. A count goes with it, so that the same value twice is still an event.
+merge_events <- function(...) {
+  last <- reactiveVal(list(n = 0))
+  lapply(list(...), function(event) {
+    observeEvent(event(), last(list(n = last()$n + 1, value = event())))
+  })
+  reactive(req(last()$value))
+}

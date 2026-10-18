@@ -67,10 +67,26 @@ function(input, output, session) {
   }
 
   start_server("start", load)
-  board_server("board", b, tick, step, open_dataset)
-  dataset_server("dataset", b, tick, current, change, step, notify)
+  board <- board_server("board", board_reactives(b, tick))
+  observeEvent(board$open(), open_dataset(board$open()))
+  observeEvent(
+    board$share(),
+    {
+      set_policy(b, board$share())
+      step()
+    },
+    ignoreInit = TRUE
+  )
+  observeEvent(
+    board$sample(),
+    {
+      set_sample(b, board$sample()[["n"]], board$sample()[["seed"]])
+      step()
+    },
+    ignoreInit = TRUE
+  )
 
-  observeEvent(input$open_dataset, open_dataset(input$open_dataset))
+  dataset_server("dataset", b, tick, current, change, step, notify)
 
   # The sidebar: the start page, the study overview and a search for one dataset.
   observeEvent(

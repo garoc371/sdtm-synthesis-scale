@@ -69,13 +69,15 @@ Not checked: clinical associations (placebo with no drug concentration, stable w
 | `global.R`, `ui.R`, `server.R` | packages, page layout, polling the build |
 | `R/pipeline.R` | load, build in workers, cache, bundle |
 | `R/source.R`, `R/supp.R`, `R/domains.R` | reading, SUPP-- folding, dataset classes and order |
-| `R/spine.R` | dates, schedule, profile, visits, records, SE, EPOCH |
-| `R/study.R` | record structure, links, graph nodes |
-| `R/rules.R` | rule search and scoring |
-| `R/models.R` | node models (`auto`, `tree`) |
+| `R/spine*.R` | dates, schedule, profile, visits, records, SE, EPOCH |
+| `R/study.R`, `R/dataset_structure.R` | record structure, links, graph nodes |
+| `R/rules.R`, `R/derivations.R` | rule search and scoring |
+| `R/models.R`, `R/node_fit.R` | node models (`auto`, `tree`) |
 | `R/generate.R` | generation and output |
 | `R/review.R` | SDTM rules and comparisons |
-| `R/mod_*.R`, `R/ui_helpers.R`, `www/` | app pages |
+| `R/mod_*.R`, `R/ui_helpers.R`, `www/` | app pages: one Shiny module per card (`mod_board_tiles.R` is the overview's tiles), taking reactives and returning what the user asks for |
+| `R/ui_build.R` | the build as the reactives the pages read; only it and `server.R` read the build |
+| `tests/testthat/` | module tests: `testthat::test_dir("tests/testthat")` |
 
 The header comment of each file explains its part in detail.
 
